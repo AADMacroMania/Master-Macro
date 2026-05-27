@@ -1488,3 +1488,150 @@ Function FormatSigFigs(ByVal v As Variant, Optional ByVal cIdx As Variant) As Va
         FormatSigFigs = r
     End If
 End Function
+ Sub CleanATData()
+    Dim wsSource As Worksheet, wsDest As Worksheet
+    Dim lastRow As Long, i As Long, destRow As Long
+    Dim resultID As String, pHiDict As Object
+    
+    ' Math Variables
+    Dim hPlus As Double, ohMinus As Double
+    Dim alkValue As Double, curPH As Double
+    Dim numerator As Double, denomCarbonate As Double, denomBicarb As Double
+
+    Set pHiDict = CreateObject("Scripting.Dictionary")
+    
+    ' --- Chemical Constants ---
+    Const Kw As Double = 6.92E-15
+    Const K2 As Double = 0.0000000000457
+    Const Gamma As Double = 1#
+    Const CaCO3_Conv As Double = 50044#
+
+    Set wsSource = ActiveSheet
+
+    ' 1. Refresh "Cleaned Data" tab
+    On Error Resume Next
+    Application.DisplayAlerts = False
+    Sheets("Cleaned Data").Delete
+    Application.DisplayAlerts = True
+    On Error GoTo 0
+    
+    Set wsDest = Sheets.Add(After:=Sheets(Sheets.Count))
+    wsDest.Name = "Cleaned Data"
+    
+    ' 2. Stacked Bilingual Headers
+    Dim headers As Variant
+    headers = Array("Result ID" & vbLf & "ID de Resultado", _
+                    "Date" & vbLf & "Fecha", _
+                    "Application" & vbLf & "Aplicación", _
+                    "Sample Name" & vbLf & "Nombre de Muestra", _
+                    "pHi" & vbLf & "pHi", _
+                    "Result Value" & vbLf & "Valor de Resultado", _
+                    "Result Unit" & vbLf & "Unidad", _
+                    "Hydroxide" & vbLf & "Hidróxido" & vbLf & "(mg/L OH-)", _
+                    "Carbonate" & vbLf & "Carbonato" & vbLf & "(mg/L CO32-)", _
+                    "Bicarbonate" & vbLf & "Bicarbonato" & vbLf & "(mg/L HCO3-)", _
+                    "Alarms" & vbLf & "Alarmas")
+    
+    For i = 0 To UBound(headers)
+        wsDest.Cells(1, i + 1).value = headers(i)
+    Next i
+    
+    lastRow = wsSource.Cells(wsSource.Rows.Count, "A").End(xlUp).row
+    
+    ' 3. First Pass: Map pHi (Fixing decimal separators for Spanish data)
+    For i = 2 To lastRow
+        If UCase(Trim(wsSource.Cells(i, 21).value)) = "PHI" Then
+            resultID = Trim(wsSource.Cells(i, 1).value)
+            Dim rawPH As String
+            rawPH = Replace(CStr(wsSource.Cells(i, 22).value), ",", ".")
+            
+            If IsNumeric(rawPH) Then
+                If Not pHiDict.Exists(resultID) Then
+                    pHiDict.Add resultID, CDbl(rawPH)
+                End If
+            End If
+        End If
+    Next i
+    
+    ' 4. Second Pass: Extract and Calculate
+    destRow = 2
+    For i = 2 To lastRow
+        Dim rowName As String, unitResult As String
+        rowName = Trim(wsSource.Cells(i, 21).value)
+        unitResult = Trim(wsSource.Cells(i, 23).value)
+        
+        Dim isAlk As Boolean
+        isAlk = (rowName = "Total Alkalinity" Or rowName = "Alcalinidad Total")
+        Dim isChlor As Boolean
+        isChlor = (rowName = "Chloride" Or rowName = "Cloruro")
+        
+        If (isAlk Or isChlor) And InStr(1, unitResult, "mg/L", vbTextCompare) > 0 Then
+            resultID = Trim(wsSource.Cells(i, 1).value)
+            wsDest.Cells(destRow, 1).value = resultID
+            wsDest.Cells(destRow, 2).value = wsSource.Cells(i, 2).value
+            wsDest.Cells(destRow, 3).value = wsSource.Cells(i, 4).value
+            wsDest.Cells(destRow, 4).value = wsSource.Cells(i, 8).value
+            
+            If pHiDict.Exists(resultID) Then
+                curPH = pHiDict(resultID)
+                
+                If curPH > 0.001 Then
+                    hPlus = 10 ^ -curPH
+                    If hPlus > 0 Then
+                        ohMinus = Kw / hPlus
+                        Dim rawAlk As String
+                        rawAlk = Replace(CStr(wsSource.Cells(i, 22).value), ",", ".")
+                        alkValue = IIf(IsNumeric(rawAlk), CDbl(rawAlk), 0)
+                        
+                        wsDest.Cells(destRow, 5).value = curPH
+                        numerator = (alkValue / CaCO3_Conv) + (hPlus / Gamma) - ohMinus
+                        
+                        If isAlk Then
+                            wsDest.Cells(destRow, 8).value = ohMinus * 17007.3
+                            denomCarbonate = 2 + (hPlus / K2)
+                            wsDest.Cells(destRow, 9).value = (numerator / denomCarbonate) * 60009.2
+                            denomBicarb = 1 + (2 * K2 / hPlus)
+                            wsDest.Cells(destRow, 10).value = (numerator / denomBicarb) * 61017.1
+                        End If
+                    End If
+                End If
+            End If
+            
+            wsDest.Cells(destRow, 6).value = wsSource.Cells(i, 22).value
+            wsDest.Cells(destRow, 7).value = unitResult
+            wsDest.Cells(destRow, 11).value = wsSource.Cells(i, 20).value
+            destRow = destRow + 1
+        End If
+    Next i
+    
+    ' 5. Formatting - Specific Precision requested
+    With wsDest
+        .Columns("A:K").AutoFit
+        
+        ' Column E (pHi) -> 2 Decimals
+        .Columns("E").NumberFormat = "0.00"
+        
+        ' Column F (Result) and H, I, J (Calculations) -> 10 Decimals
+        .Columns("F").NumberFormat = "0.0000000000"
+        .Range("H:J").NumberFormat = "0.0000000000"
+        
+        ' Style Headers
+        With .Rows(1)
+            .Font.Bold = True
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+            .WrapText = True
+            .RowHeight = 40
+        End With
+        
+        ' Ensure columns are wide enough for the 10-decimal numbers
+        Dim col As Long
+        For col = 1 To 11
+            ' Increase minimum width to 22 to accommodate 10 decimals nicely
+            If .Columns(col).ColumnWidth < 22 Then .Columns(col).ColumnWidth = 22
+        Next col
+    End With
+
+    wsDest.Activate
+    MsgBox "Clean Up Complete", vbInformation
+End Sub
