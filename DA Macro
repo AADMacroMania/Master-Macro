@@ -37,7 +37,7 @@ Sub DiscreteCleanData()
     On Error GoTo ErrorHandler
 
     Set wsSource = ActiveSheet
-    If wsSource.Name = "Clean Data" Then Exit Sub
+    If wsSource.name = "Clean Data" Then Exit Sub
 
     response = MsgBox("Are you sure you want to make this pretty?", vbYesNo)
     If response = vbNo Then Exit Sub
@@ -89,7 +89,7 @@ Sub DiscreteCleanData()
     On Error GoTo ErrorHandler
 
     Set wsClean = Sheets.Add
-    wsClean.Name = "Clean Data"
+    wsClean.name = "Clean Data"
     
     ' --- Pass 1: Parse Data (Filtering for MA Status) ---
     ReDim arrStandards(0 To 46, 0 To 0)
@@ -111,7 +111,7 @@ Sub DiscreteCleanData()
                 End If
                 
                 timeStr = CStr(wsSource.Cells(rowNum, valColIdx + 2).value)
-                dilVal = val(wsSource.Cells(rowNum, "L").value)
+                dilVal = Val(wsSource.Cells(rowNum, "L").value)
                 
                 tempCol = 0
                 Select Case testType
@@ -130,11 +130,9 @@ Sub DiscreteCleanData()
                     Case "PO4 High", "PO4 VHigh", "PO4 Alto", "PO4 Low", "PO4 Bajo"
                         tempCol = 25
                         tempVal = tempVal / 1000
-                    Case "TON Low", "TON Bajo"
+                    Case "TON High", "TON Alto", "TON Low", "TON Bajo"
                         tempCol = 29
                         tempVal = tempVal / 1000
-                    Case "TON High", "TON Alto"
-                        tempCol = 29
                     Case "NO2"
                         tempCol = 33
                         tempVal = tempVal / 1000
@@ -377,7 +375,7 @@ Function GetQCError(ws As Worksheet, rawRow As Long, targetCol As Integer, stdSt
             pos1 = InStr(cVal, "(") + 1
             pos2 = InStr(cVal, "%")
             If pos1 > 1 And pos2 > 0 Then
-                recVal = val(Mid(cVal, pos1, pos2 - pos1))
+                recVal = Val(Mid(cVal, pos1, pos2 - pos1))
                 If ws.Cells(r, 47).value < rawRow Then
                     pErr = Abs(100 - recVal)
                 End If
@@ -497,5 +495,4 @@ Function FormatSigFigs(ByVal v As Variant, Optional ByVal cIdx As Variant) As Va
         FormatSigFigs = r
     End If
 End Function
-
 
