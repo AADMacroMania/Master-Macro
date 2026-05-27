@@ -990,3 +990,501 @@ ErrorHandler:
     GoTo CleanExit
 
 End Sub
+
+Sub DiscreteCleanData()
+    ' --- Variable Declarations ---
+    Dim i As Long
+    Dim k As Long
+    Dim rowNum As Long
+    Dim tempCol As Integer
+    Dim tempVal As Double
+    Dim response As VbMsgBoxResult
+    Dim sampleName As String
+    Dim testType As String
+    Dim timeStr As String
+    Dim dilVal As Double
+    Dim statusColIdx As Integer
+    Dim typeColIdx As Integer
+    Dim valColIdx As Integer
+    Dim startRowIdx As Integer
+    Dim sampleColIdx As Integer
+    Dim headerArr As Variant
+    Dim arrStandards() As Variant
+    Dim wsSource As Worksheet
+    Dim wsClean As Worksheet
+    Dim lastRowNum As Long
+    Dim numStandards As Long
+    Dim dictMQL As Object
+    Dim xlC As Range
+    Dim minColWidth As Double
+    Dim dictRaw As Object
+    Dim keySample As Variant
+    Dim keyCol As Variant
+    Dim dictInner As Object
+    Dim statusVal As String
+    Dim typeVal As String
+    Dim stdRowStart As Long
+    Dim resultsArr() As Variant
+    Dim sampleIdx As Long
+
+    On Error GoTo ErrorHandler
+
+    Set wsSource = ActiveSheet
+    If wsSource.name = "Clean Data" Then Exit Sub
+
+    response = MsgBox("Are you sure you want to make this pretty?", vbYesNo)
+    If response = vbNo Then Exit Sub
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+
+    ' --- Config & MQL Setup ---
+    minColWidth = 14
+    statusColIdx = 9
+    typeColIdx = 2
+    valColIdx = 5
+    startRowIdx = 12
+    sampleColIdx = 1
+
+    Set dictMQL = CreateObject("Scripting.Dictionary")
+    dictMQL.CompareMode = 1
+    dictMQL.Add "Alkalinity", 3.4
+    dictMQL.Add "Alc", 3.4
+    dictMQL.Add "Fluoride", 0.008
+    dictMQL.Add "Fluoruro", 0.008
+    dictMQL.Add "SO4 High", 0.26
+    dictMQL.Add "SO4 Low", 0.26
+    dictMQL.Add "SO4 Alto", 0.26
+    dictMQL.Add "SO4 Bajo", 0.26
+    dictMQL.Add "Cl High", 0.035
+    dictMQL.Add "Cl Alto", 0.035
+    dictMQL.Add "PO4 High", 0.00004
+    dictMQL.Add "PO4 Alto", 0.00004
+
+    headerArr = Array("pH", "Timestamp", "Dilution +1", "Test Name", _
+        "Conductivity" & Chr(10) & "Conductividad", "Timestamp", "Dilution +1", "Test Name", _
+        "Alkalinity" & Chr(10) & "Alcalinidad", "Timestamp", "Dilution +1", "Test Name", _
+        "Chloride" & Chr(10) & "Chloruro" & Chr(10) & "Cl-", "Timestamp", "Dilution +1", "Test Name", _
+        "Fluoride" & Chr(10) & "Fluoruro" & Chr(10) & "F-", "Timestamp", "Dilution +1", "Test Name", _
+        "Sulphate" & Chr(10) & "Sulfato" & Chr(10) & "SO42-", "Timestamp", "Dilution +1", "Test Name", _
+        "Phosphate (Inorganic)" & Chr(10) & "Fosfato (Inorgánico)" & Chr(10) & "PO43-", "Timestamp", "Dilution +1", "Test Name", _
+        "Total Oxidized Nitrogen" & Chr(10) & "Nitrógeno Oxidado Total" & Chr(10) & "TON", "Timestamp", "Dilution +1", "Test Name", _
+        "Nitrite" & Chr(10) & "Nitrito" & Chr(10) & "NO2-", "Timestamp", "Dilution +1", "Test Name", _
+        "Nitrate" & Chr(10) & "Nitrato" & Chr(10) & "NO3-", "Timestamp", "Dilution +1", "Test Name", _
+        "Total Oxidized Nitrogen V" & Chr(10) & "TON V", "Timestamp", "Dilution +1", "Test Name")
+
+    Set dictRaw = CreateObject("Scripting.Dictionary")
+
+    On Error Resume Next
+    Application.DisplayAlerts = False
+    Sheets("Clean Data").Delete
+    Application.DisplayAlerts = True
+    On Error GoTo ErrorHandler
+
+    Set wsClean = Sheets.Add
+    wsClean.name = "Clean Data"
+    
+    ' --- Pass 1: Parse Data (Filtering for MA Status) ---
+    ReDim arrStandards(0 To 46, 0 To 0)
+    numStandards = 0
+    lastRowNum = wsSource.Cells(wsSource.Rows.Count, sampleColIdx).End(xlUp).row
+
+    For rowNum = startRowIdx To lastRowNum
+        If Not IsError(wsSource.Cells(rowNum, statusColIdx)) Then
+            statusVal = UCase(Trim(CStr(wsSource.Cells(rowNum, statusColIdx).value)))
+            
+            If statusVal = "MA" Then
+                sampleName = Trim(CStr(wsSource.Cells(rowNum, sampleColIdx).value))
+                testType = Trim(CStr(wsSource.Cells(rowNum, 3).value))
+                If UCase(testType) = "TON-V SW1R" Then testType = "TON V"
+                
+                tempVal = 0
+                If IsNumeric(wsSource.Cells(rowNum, valColIdx).value) Then
+                    tempVal = CDbl(wsSource.Cells(rowNum, valColIdx).value)
+                End If
+                
+                timeStr = CStr(wsSource.Cells(rowNum, valColIdx + 2).value)
+                dilVal = Val(wsSource.Cells(rowNum, "L").value)
+                
+                tempCol = 0
+                Select Case testType
+                    Case "pH @ 37C"
+                        tempCol = 1
+                    Case "Cond @ 37C"
+                        tempCol = 5
+                    Case "Alkalinity", "Alc"
+                        tempCol = 9
+                    Case "Cl VHigh", "Cl High", "Cl Low", "Cl Alto", "Cl Bajo"
+                        tempCol = 13
+                    Case "Fluoride", "Fluoruro"
+                        tempCol = 17
+                    Case "SO4 High", "SO4 Low", "SO4 Alto", "SO4 Bajo"
+                        tempCol = 21
+                    Case "PO4 High", "PO4 VHigh", "PO4 Alto", "PO4 Low", "PO4 Bajo"
+                        tempCol = 25
+                        tempVal = tempVal / 1000
+                    Case "TON High", "TON Alto", "TON Low", "TON Bajo"
+                        tempCol = 29
+                        tempVal = tempVal / 1000
+                    Case "NO2"
+                        tempCol = 33
+                        tempVal = tempVal / 1000
+                    Case "NO3 High", "NO3 Low", "NO3 Alto", "NO3 Bajo"
+                        tempCol = 37
+                        tempVal = tempVal / 1000
+                    Case "TON V"
+                        tempCol = 41
+                        tempVal = tempVal / 1000
+                End Select
+
+                If tempCol > 0 Then
+                    typeVal = UCase(Trim(CStr(wsSource.Cells(rowNum, typeColIdx).value)))
+                    If typeVal = "P" Then
+                        If Not dictRaw.Exists(sampleName) Then Set dictRaw(sampleName) = CreateObject("Scripting.Dictionary")
+                        Set dictInner = dictRaw(sampleName)
+                        If Not dictInner.Exists(tempCol) Then dictInner.Add tempCol, New Collection
+                        dictInner(tempCol).Add Array(tempVal, timeStr, dilVal, testType, rowNum)
+                    ElseIf typeVal = "C" Then
+                        arrStandards(0, numStandards) = sampleName
+                        arrStandards(tempCol, numStandards) = tempVal
+                        arrStandards(tempCol + 1, numStandards) = timeStr
+                        arrStandards(tempCol + 2, numStandards) = dilVal
+                        arrStandards(tempCol + 3, numStandards) = testType
+                        arrStandards(46, numStandards) = rowNum
+                        numStandards = numStandards + 1
+                        ReDim Preserve arrStandards(0 To 46, 0 To numStandards)
+                    End If
+                End If
+            End If
+        End If
+    Next rowNum
+
+    ' --- Pass 2: Setup Standards & QC ---
+    wsClean.Cells(1, 1).value = "ControlID"
+    wsClean.Cells(2, 1).value = "Units"
+    wsClean.Cells(3, 1).value = "MQL"
+    wsClean.Range("B1").Resize(1, UBound(headerArr) + 1).value = headerArr
+    
+    stdRowStart = 1000
+    If numStandards > 0 Then
+        wsClean.Cells(stdRowStart, 1).Resize(numStandards, 47).value = Application.Transpose(arrStandards)
+        ProcessQC wsClean, stdRowStart, numStandards
+    End If
+
+    ' --- Pass 3: Process Samples ---
+    ReDim resultsArr(0 To UBound(headerArr) + 1, 0 To dictRaw.Count)
+    sampleIdx = 0
+    For Each keySample In dictRaw.Keys
+        resultsArr(0, sampleIdx) = keySample
+        Set dictInner = dictRaw(keySample)
+        For Each keyCol In dictInner.Keys
+            AnalyzeResults wsClean, dictInner(keyCol), resultsArr, sampleIdx, CInt(keyCol), stdRowStart, numStandards, dictMQL
+        Next keyCol
+        sampleIdx = sampleIdx + 1
+    Next keySample
+
+    ' Layout Final Data
+    If sampleIdx > 0 Then
+        wsClean.Cells(4, 1).Resize(sampleIdx, UBound(resultsArr, 1) + 1).value = Application.Transpose(resultsArr)
+    End If
+    
+    ' Move Standards underneath data
+    If numStandards > 0 Then
+        wsClean.Rows(stdRowStart & ":" & stdRowStart + (numStandards - 1)).Cut Destination:=wsClean.Rows(4 + sampleIdx)
+    End If
+    
+    ApplyFormatting wsClean, sampleIdx, numStandards, headerArr, minColWidth, dictMQL
+
+CleanExit:
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Error: " & Err.Description
+    Resume CleanExit
+End Sub
+
+Sub AnalyzeResults(ws As Worksheet, colMeasures As Collection, ByRef arrFinal As Variant, sIdx As Long, targetCol As Integer, stdStart As Long, stdCnt As Long, dictMQL As Object)
+    Dim measure As Variant
+    Dim collGood As New Collection
+    Dim collFiltered As New Collection
+    Dim bestMeasure As Variant
+    Dim minErr As Double
+    Dim currentErr As Double
+    Dim sumVals As Double
+    Dim limVal As Double
+    Dim testNameStr As String
+
+    minErr = 999999
+    
+    For Each measure In colMeasures
+        If IsNumeric(measure(0)) Then
+            If CDbl(measure(0)) > 0 Then
+                collFiltered.Add measure
+            End If
+        End If
+    Next measure
+    
+    If collFiltered.Count = 0 Then Exit Sub
+
+    For Each measure In collFiltered
+        If IsInGoodSandwich(ws, CLng(measure(4)), targetCol, stdStart, stdCnt) Then
+            collGood.Add measure
+        End If
+    Next measure
+
+    If collGood.Count > 0 Then
+        If collGood.Count = 1 Then
+            bestMeasure = collGood(1)
+        Else
+            ' Case 2: Average Repeats
+            sumVals = 0
+            For Each measure In collGood
+                sumVals = sumVals + measure(0)
+            Next measure
+            arrFinal(targetCol, sIdx) = FormatSigFigs(sumVals / collGood.Count, targetCol)
+            ws.Cells(sIdx + 4, targetCol + 1).Font.Color = RGB(0, 112, 192)
+            ws.Cells(sIdx + 4, targetCol + 1).Font.Bold = True
+            arrFinal(targetCol + 1, sIdx) = ""
+            arrFinal(targetCol + 2, sIdx) = collGood(1)(2)
+            arrFinal(targetCol + 3, sIdx) = collGood(1)(3)
+            Exit Sub
+        End If
+    Else
+        ' Case 3: Pick measure near best QCs
+        For Each measure In collFiltered
+            currentErr = GetQCError(ws, CLng(measure(4)), targetCol, stdStart, stdCnt)
+            If currentErr < minErr Then
+                minErr = currentErr
+                bestMeasure = measure
+            End If
+        Next measure
+    End If
+
+    ' Labels for Detection Limits
+    testNameStr = CStr(bestMeasure(3))
+    If dictMQL.Exists(testNameStr) Then
+        limVal = CDbl(dictMQL(testNameStr))
+        If limVal > 0 And bestMeasure(0) < limVal Then
+            arrFinal(targetCol, sIdx) = "<" & FormatSigFigs(limVal, targetCol)
+        Else
+            arrFinal(targetCol, sIdx) = FormatSigFigs(bestMeasure(0), targetCol)
+        End If
+    Else
+        arrFinal(targetCol, sIdx) = FormatSigFigs(bestMeasure(0), targetCol)
+    End If
+    
+    arrFinal(targetCol + 1, sIdx) = IIf(IsDate(bestMeasure(1)), Format(bestMeasure(1), "hh:mm AM/PM"), bestMeasure(1))
+    arrFinal(targetCol + 2, sIdx) = bestMeasure(2)
+    arrFinal(targetCol + 3, sIdx) = bestMeasure(3)
+End Sub
+
+Sub ProcessQC(ws As Worksheet, startIdx As Long, cnt As Long)
+    Dim r As Long
+    Dim c As Integer
+    Dim qcTarget As Double
+    Dim qcRec As Double
+    Dim qcName As String
+    Dim qcVal As Double
+
+    For c = 2 To 42 Step 4
+        For r = startIdx To startIdx + (cnt - 1)
+            If Not IsError(ws.Cells(r, 1)) Then
+                qcName = UCase(Trim(CStr(ws.Cells(r, 1).value)))
+                qcVal = ws.Cells(r, c).value
+                If qcVal > 0 Then
+                    qcTarget = 0
+                    If c = 2 Then ' pH Targets
+                        If InStr(qcName, "PH 4") > 0 Then qcTarget = 4.01
+                        If InStr(qcName, "PH 7") > 0 Then qcTarget = 7
+                        If InStr(qcName, "PH 10") > 0 Then qcTarget = 10.01
+                        
+                        If qcTarget > 0 Then
+                            ws.Cells(r, c).value = FormatSigFigs(qcVal, c) & " (" & Format((qcVal / qcTarget) * 100, "0.0") & "%)"
+                            If Abs(qcVal - qcTarget) > 0.1 Then
+                                ws.Cells(r, c).Font.Color = vbRed
+                            End If
+                        End If
+                    Else
+                        If c = 6 Then qcTarget = 199.622
+                        If c = 10 Then qcTarget = 300
+                        If c = 14 Then qcTarget = 120030
+                        If c = 22 Then qcTarget = 20004.6
+                        
+                        If qcTarget > 0 Then
+                            qcRec = (qcVal / qcTarget) * 100
+                            ws.Cells(r, c).value = FormatSigFigs(qcVal, c) & " (" & Format(qcRec, "0.0") & "%)"
+                            If qcRec < 90 Or qcRec > 110 Then
+                                ws.Cells(r, c).Font.Color = vbRed
+                            End If
+                        End If
+                    End If
+                Else
+                    ' QC Zero suppression
+                    ws.Cells(r, c).value = ""
+                End If
+            End If
+        Next r
+    Next c
+End Sub
+
+Function IsInGoodSandwich(ws As Worksheet, rawRow As Long, targetCol As Integer, stdStart As Long, stdCnt As Long) As Boolean
+    Dim r As Long
+    Dim pFail As Boolean
+    Dim nFail As Boolean
+    pFail = False
+    nFail = False
+    
+    For r = stdStart To stdStart + (stdCnt - 1)
+        If ws.Cells(r, targetCol + 1).value <> "" Then
+            If ws.Cells(r, 47).value < rawRow Then
+                pFail = (ws.Cells(r, targetCol + 1).Font.Color = vbRed)
+            End If
+            If ws.Cells(r, 47).value > rawRow Then
+                nFail = (ws.Cells(r, targetCol + 1).Font.Color = vbRed)
+                Exit For
+            End If
+        End If
+    Next r
+    IsInGoodSandwich = (Not pFail And Not nFail)
+End Function
+
+Function GetQCError(ws As Worksheet, rawRow As Long, targetCol As Integer, stdStart As Long, stdCnt As Long) As Double
+    Dim r As Long
+    Dim pErr As Double
+    Dim nErr As Double
+    Dim cVal As String
+    Dim pos1 As Long
+    Dim pos2 As Long
+    Dim recVal As Double
+    
+    pErr = 100
+    nErr = 100
+    
+    For r = stdStart To stdStart + (stdCnt - 1)
+        If ws.Cells(r, targetCol + 1).value <> "" Then
+            cVal = ws.Cells(r, targetCol + 1).value
+            pos1 = InStr(cVal, "(") + 1
+            pos2 = InStr(cVal, "%")
+            If pos1 > 1 And pos2 > 0 Then
+                recVal = Val(Mid(cVal, pos1, pos2 - pos1))
+                If ws.Cells(r, 47).value < rawRow Then
+                    pErr = Abs(100 - recVal)
+                End If
+                If ws.Cells(r, 47).value > rawRow Then
+                    nErr = Abs(100 - recVal)
+                    Exit For
+                End If
+            End If
+        End If
+    Next r
+    GetQCError = pErr + nErr
+End Function
+
+Sub ApplyFormatting(ws As Worksheet, dRows As Long, sRows As Long, heads As Variant, mW As Double, mqls As Object)
+    Dim lastR As Long
+    Dim i As Long
+    Dim grpArr As Variant
+    Dim grp As Variant
+    Dim xlC As Range
+    Dim startC As Long
+
+    lastR = 4 + dRows + sRows
+    ws.Range("A1:AZ3").Font.Bold = True
+    ws.Range("A1:AZ" & lastR).HorizontalAlignment = -4108 ' xlCenter
+    ws.Range("B1").Resize(1, UBound(heads) + 1).WrapText = True
+    
+    ' Populate MQL Row numbers explicitly
+    ws.Cells(3, 10).value = FormatSigFigs(mqls("Alkalinity"), 9)
+    ws.Cells(3, 14).value = FormatSigFigs(mqls("Cl High"), 13)
+    ws.Cells(3, 18).value = FormatSigFigs(mqls("Fluoride"), 17)
+    ws.Cells(3, 22).value = FormatSigFigs(mqls("SO4 High"), 21)
+    ws.Cells(3, 26).value = FormatSigFigs(mqls("PO4 High"), 25)
+    
+    grpArr = Array(Array(2, 5), Array(6, 9), Array(10, 13), Array(14, 17), Array(18, 21), Array(22, 25), Array(26, 29), Array(30, 33), Array(34, 37), Array(38, 41), Array(42, 45))
+    For i = 0 To UBound(grpArr)
+        grp = grpArr(i)
+        startC = grp(0)
+        ws.Range(ws.Cells(1, startC + 1), ws.Cells(lastR, startC + 3)).Interior.Color = RGB(248, 248, 248)
+        With ws.Range(ws.Cells(1, startC), ws.Cells(lastR, startC)).Borders(7) ' xlEdgeLeft
+            .LineStyle = 1
+            .Weight = 2
+        End With
+        ws.Columns(startC + 2).EntireColumn.Hidden = True
+        ws.Columns(startC + 3).EntireColumn.Hidden = True
+    Next
+    
+    ws.Range("A3").Resize(1, UBound(heads) + 1).Interior.Color = RGB(242, 242, 242)
+    With ws.Range("A3").Resize(1, UBound(heads) + 1).Borders(9) ' xlEdgeBottom
+        .LineStyle = 1
+        .Weight = 4
+    End With
+    
+    If dRows > 0 Then
+        With ws.Range(ws.Cells(4 + dRows - 1, 1), ws.Cells(4 + dRows - 1, UBound(heads) + 1)).Borders(9)
+            .LineStyle = 1
+            .Weight = 4
+        End With
+    End If
+    
+    For i = 3 To 43 Step 4
+        ws.Range(ws.Cells(4, i), ws.Cells(lastR, i)).NumberFormat = "hh:mm AM/PM"
+    Next i
+    
+    ws.Columns("A:A").AutoFit
+    For Each xlC In ws.Range("B1:AZ1").Columns
+        If Not xlC.EntireColumn.Hidden Then
+            If xlC.ColumnWidth < mW Then xlC.ColumnWidth = mW
+        End If
+    Next xlC
+    
+    ' Standard Units Row
+    ws.Cells(2, 6).value = "mS/cm"
+    ws.Cells(2, 10).value = "mg/L as CaCO3"
+    ws.Cells(2, 14).value = "mg/L"
+    ws.Cells(2, 18).value = "mg/L"
+    ws.Cells(2, 22).value = "mg/L"
+    ws.Cells(2, 26).value = "mg/L"
+    ws.Cells(2, 30).value = "mg/L"
+    ws.Cells(2, 34).value = "mg/L"
+    ws.Cells(2, 38).value = "mg/L"
+    ws.Cells(2, 42).value = "mg/L"
+    
+    ws.Activate
+    ws.Cells(4, 2).Activate
+    ActiveWindow.FreezePanes = True
+End Sub
+
+Function RoundSig(ByVal v As Double, ByVal l As Long) As Double
+    Dim f As Double
+    If v = 0 Then
+        RoundSig = 0
+        Exit Function
+    End If
+    f = 10 ^ (l - 1 - Int(Log(Abs(v)) / Log(10)))
+    RoundSig = Round(v * f, 0) / f
+End Function
+
+Function FormatSigFigs(ByVal v As Variant, Optional ByVal cIdx As Variant) As Variant
+    Dim s As Long
+    Dim r As Double
+    If Not IsNumeric(v) Or v = 0 Then
+        If v = 0 Then
+            FormatSigFigs = "0"
+        Else
+            FormatSigFigs = v
+        End If
+        Exit Function
+    End If
+    s = 4
+    If Not IsMissing(cIdx) Then
+        If cIdx = 1 Or cIdx = 2 Then s = 3
+    End If
+    r = RoundSig(CDbl(v), s)
+    If Abs(r) >= 10 ^ (s - 1) And r = Int(r) Then
+        FormatSigFigs = CStr(Int(r))
+    Else
+        FormatSigFigs = r
+    End If
+End Function
