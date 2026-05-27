@@ -1,1 +1,993 @@
+'Written by Kayla Cocco for Summit Nanotech July 2022
+'Updated Aug 2022 by Kayla Cocco
+    'ICP - Account for a new Boron column
+'Updated Nov 2024 by Kayla Cocco
+    'ICP - Calculate and replace LODs and MQLs in post-processing from 20 repeats, and replace QC concentrations with % Recovery
+'Updated May 2025 by Michaela Schmidt
+    'ICP - Added MQL calculation to additional dilutions (duplicate consecutive sample IDs)
+    'ICP - Only replacing first dilution values if the additional dilution has at least 2 "N/A" values (only 1 would always be true when La is not quantified) *or* the first dilution value is "Overrange"
+    'ICP - LOD now accounts for dilution factor, replaced ">LOD & <MQL" redundant text (as >LOD is implied) with simply, "<MQL"
+    'ICP - Added colour highlighting for QCs, Blanks & Standards
+    'ICP - Added Freeze Panes to both tabs
+'Updated Jun 2025 by Michaela Schmidt
+    'DA - Added Br, TON, NO2, NO3 and combined the SCL and YYC versions into a single macro
+    'ICP - Added Rack Number and Vial Numbers to export and Clean Data
+'Updated June 13th-19th By Andorra Pitcher
+    'DA - Added English and Spanish Headlines
+    'DA - Added MQL limits and made it grey
+'Updated June 20th by Andorra Pitcher
+    'DA - Macro now reports to 3 significant Figures but to a maximum of 2 decimal places
+'Updated July 3rd by Andorra Pitcher
+    'DA - Auto Fit Headings of the Columns and Sample ID
+'Updated Nov 2025 by Michaela Schmidt
+    'ICP - New macro for Rare Earth metals
+'Updated Mar 2026 by Michaela Schmidt
+    'ICP - Added handling of spike samples in normal macro
+'Updated May 2026 by Michaela Schmidt
+    'ICP - Revised to handle any new analyte or new calibration standards, merged functionality between normal macro and rare earths version, and eliminated extra macro
+    'ICP - Updated to support both Standard and Automatic XML Formats
+
+Option Explicit
+
+'Global variables for the module- need to be configured for the data
+Const FirstRow As Long = 8                                                      ' first row for placing data that is returned from the recordset
+Const lastRow As Long = 1001                                                    ' last row for placing data that is returned from the recordset
+Const FirstCol As Long = 2                                                      ' first column to start placing data in report
+Const lastCol As Long = 28                                                      ' last column to end placing of data in report
+Const NameRow As Long = 3                                                       ' select which row contains element data
+Const DataRow As Long = 8                                                       ' First row for data insertion after the headers
+Const TypeRow As Long = 1                                                       ' Row that has the type of data included
+
+' global sheet variables
+Dim xlsht As Worksheet         ' reference to this worksheet
+Dim cleanSheet As Worksheet     'reference to new worksheet
+Dim dataStorage() As Variant  ' reference to dataset collected from the ICP layout
+Dim col As Long               ' reference to col
+Dim row As Long                'reference to row
+Dim elementArray() As String       'List of column numbers for insertion
+Dim firstRowArray() As String       'placeholder for the element names
+Dim dFArray() As Variant              'holds the dilution factor information
+Dim stddFArray() As Variant
+Dim sdArray() As Variant
+Dim paramBArray() As Variant
+Dim WaveLengthArray() As Variant
+
+' this macro is used to clean up the ICP Data Export
+Sub ICPCleanData()
+    Dim i As Integer
+    Dim j As Integer
+    Dim k As Integer
+    Dim l As Integer
+    Dim m As Integer
+    Dim idf As Integer
+    Dim fdf As Integer
+    Dim sd As Integer
+    Dim pb As Integer
+    Dim placeholder As Integer
+    Dim totalElements As Integer
+    Dim numElements As Integer
+    Dim arrSplitString() As String
+    Dim tempString As String
+    Dim response As String
+    Dim message As String
+    Dim editFlag As Boolean
+    Dim skip As Boolean
+    Dim rinse As Boolean
+    Dim dataStorage() As String
+    Dim standardStorage() As String
+    Dim dataFontColourStorage() As Variant
+    Dim standardsFontColourStorage() As Variant
+    Dim blankRow As Long
+    Dim paramBRow As Long
+    Dim FindRow As Range
+    Dim LOD As Double
+    Dim dF As Double
+    Dim MQL As Double
+    Dim avgVal As Variant
+    Dim colIndex As Long
+    Dim elName As String
+    Dim elWave As String
+    Dim keepWave As String
+    Dim templateArr As Variant
+    Dim endCol As Long
+    
+    On Error GoTo ErrorHandler
+    
+    ' Variables for the Recovery Fix
+    Dim findEle As Integer
+    
+    ' Variables for the Excel Column Sort
+    Dim sortOrder As Variant
+    Dim x As Long
+    Dim currentTargetCol As Integer
+    Dim maxCol As Long
+    Dim colScan As Long
+    Dim headerVal As String
+    Dim splitVal() As String
+    Dim foundMatch As Boolean
+    
+    response = MsgBox("Are you sure you want to make this pretty?", vbYesNo)
+ 
+    If response = vbNo Then
+        MsgBox ("Macro Ending")
+        Exit Sub
+    End If
+    
+    Application.ScreenUpdating = False
+        
+    Set xlsht = ActiveSheet
+    Sheets.Add.Name = "Clean Data"
+
+    Set cleanSheet = Sheets("Clean Data")
+    
+    ' === DYNAMIC COLUMN LOCATOR LOGIC ===
+    Dim colSampleLine As Integer, colComment As Integer, colAmount As Integer
+    Dim colDilution As Integer, colRackNum As Integer, colVialNum As Integer
+    Dim colScanMax As Long, cSearch As Integer
+    
+    ' Determine max column from Row 1
+    colScanMax = xlsht.Cells(1, xlsht.Columns.Count).End(xlToLeft).column
+    If colScanMax < 50 Then colScanMax = 500
+    
+    ' Dynamic detection for metadata
+    For cSearch = 1 To 30
+        If Trim(xlsht.Cells(2, cSearch).value) = "SampleLine" Then colSampleLine = cSearch
+        If Trim(xlsht.Cells(2, cSearch).value) = "Comment" Then colComment = cSearch
+        If Trim(xlsht.Cells(3, cSearch).value) = "Amount" Then colAmount = cSearch
+        If InStr(Trim(xlsht.Cells(3, cSearch).value), "Total Dilution Factor") > 0 Then colDilution = cSearch
+        If Trim(xlsht.Cells(2, cSearch).value) = "Rack Number" Then colRackNum = cSearch
+        If Trim(xlsht.Cells(2, cSearch).value) = "Vial Numbers" Then colVialNum = cSearch
+    Next cSearch
+    
+    ' Fallback values to Original Standard File config
+    If colSampleLine = 0 Then colSampleLine = 2
+    If colComment = 0 Then colComment = 3
+    If colAmount = 0 Then colAmount = 4
+    If colDilution = 0 Then colDilution = 5
+    If colRackNum = 0 Then colRackNum = 6
+    If colVialNum = 0 Then colVialNum = 7
+    ' ====================================
+
+    'clean sheet formatting
+    cleanSheet.Cells(1, 1).value = "SampleLine"
+    cleanSheet.Cells(2, 1).value = "Wavelength (nm)"
+    cleanSheet.Cells(3, 1).value = "Units"
+    cleanSheet.Cells(4, 1).value = "LOD (1x dilution)"
+    cleanSheet.Cells(5, 1).value = "LOD (17.5x dilution)"
+    cleanSheet.Cells(6, 1).value = "MQL (1x dilution)"
+    cleanSheet.Cells(7, 1).value = "MQL (17.5x dilution)"
+    cleanSheet.Cells(4, 2).value = "LOD=SD_Blank*TDF*3/Slope"
+    cleanSheet.Cells(6, 2).value = "MQL=LOD*TDF*10/3"
+    
+    ' === RANGE EXTENDED TO BZ ===
+    cleanSheet.Range("B1:BZ1").Font.Bold = True
+    cleanSheet.Range("B2:BZ6").Font.Size = 10
+    cleanSheet.Range("B2:BZ3").Font.Color = 15
+    cleanSheet.Range("B1:BZ1001").HorizontalAlignment = xlCenter
+    cleanSheet.Range("A4:BZ7").Interior.Color = RGB(242, 242, 242)
+    ' ============================
+    
+    With xlsht
+        Set FindRow = .Columns(colSampleLine).Find(What:="Blank-20", LookIn:=xlValues)
+        If FindRow Is Nothing Then
+            'If Blank-20 is missing, delete the new sheet before stopping
+                Application.DisplayAlerts = False
+                Sheets("Clean Data").Delete
+                Application.DisplayAlerts = True
+            MsgBox "Blank-20 sample missing from raw results." & vbNewLine & "Please insert most recent Blank-20 from previous analysis." & vbNewLine & vbNewLine & "Falta la muestra del Blank-20 en los resultados brutos." & vbNewLine & "Inserte el Blank-20 más reciente del análisis anterior.", vbExclamation, "Missing Sample"
+            Exit Sub
+        End If
+        blankRow = FindRow.row
+        Set FindRow = .Columns(colSampleLine).Find(What:="STD1-1", LookIn:=xlValues)
+        paramBRow = FindRow.row
+        If paramBRow = 0 Then
+             Set FindRow = .Columns(colSampleLine).Find(What:="STD1-2", LookIn:=xlValues)
+            paramBRow = FindRow.row
+        End If
+    End With
+    
+    i = 0
+    sd = 0
+    pb = 0
+    ' Gather headers correctly accounting for potential space columns
+    For col = 1 To colScanMax
+        If xlsht.Cells(NameRow, col).value <> "" Then
+            arrSplitString = Split(CStr(xlsht.Cells(NameRow, col).value), " ")
+            If InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ExtCal.Average") <> 0 Then
+                ReDim Preserve firstRowArray(i)
+                ReDim Preserve elementArray(i)
+                ReDim Preserve WaveLengthArray(i)
+                firstRowArray(i) = arrSplitString(0)
+                WaveLengthArray(i) = arrSplitString(1)
+                i = i + 1
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "Raw.STD") <> 0 Then
+                ReDim Preserve sdArray(sd)
+                sdArray(sd) = xlsht.Cells(blankRow, col).value
+                sd = sd + 1
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ParameterB") <> 0 Then
+                ReDim Preserve paramBArray(pb)
+                paramBArray(pb) = xlsht.Cells(paramBRow, col).value
+                pb = pb + 1
+            End If
+        End If
+    Next col
+        
+    For i = 0 To ArrayLen(firstRowArray) - 1
+        'All non-fixed elements including internal standard, start dynamically at column C (col index 3)
+        cleanSheet.Cells(1, 3 + i).value = firstRowArray(i)
+        cleanSheet.Cells(2, 3 + i).value = WaveLengthArray(i)
+        
+        '--- Distinguish between Internal Standards (Y) and Analytes ---
+        If firstRowArray(i) = "Y" Then
+            cleanSheet.Cells(3, 3 + i).value = "% Recovery"
+        Else
+            cleanSheet.Cells(3, 3 + i).value = "mg/L"
+        End If
+        ' --------------------------------------------------------------
+        
+        elementArray(i) = 3 + i
+        
+        If paramBArray(i) <> 0 Then
+            LOD = (sdArray(i) * 3) / paramBArray(i)
+        Else
+            LOD = 0
+        End If
+        
+        cleanSheet.Cells(4, 3 + i).value = LOD
+        cleanSheet.Cells(5, 3 + i).value = LOD * 17.5
+        cleanSheet.Cells(6, 3 + i).value = LOD * 1 * 10 / 3
+        cleanSheet.Cells(7, 3 + i).value = LOD * 17.5 * 10 / 3
+        
+    Next i
+    
+    numElements = ArrayLen(firstRowArray)
+    
+    ' Format columns completely dynamically based on number of elements
+    cleanSheet.Range(Cells(2, 3), Cells(2, 2 + numElements)).NumberFormat = "0.000" ' <--- Forces 3 d.p. on Wavelengths
+    cleanSheet.Range(Cells(4, 3), Cells(4, 2 + numElements)).NumberFormat = "#0.0000"
+    cleanSheet.Range(Cells(5, 3), Cells(5, 2 + numElements)).NumberFormat = "#0.000"
+    cleanSheet.Range(Cells(6, 3), Cells(6, 2 + numElements)).NumberFormat = "#0.0000"
+    cleanSheet.Range(Cells(7, 3), Cells(7, 2 + numElements)).NumberFormat = "#0.00"
+    
+    totalElements = UBound(firstRowArray) + 1
+    ReDim Preserve elementArray(totalElements)
+    
+    ' Map the "Comments" column to the end of the data block
+    elementArray(totalElements) = 3 + numElements
+
+    cleanSheet.Cells(1, 2).value = "Comments"
+    
+    ' Place footer columns immediately after the last data column
+    idf = 3 + numElements + 1
+    fdf = 3 + numElements + 2
+    
+    cleanSheet.Cells(1, idf).value = "Initial Dilution Factor"
+    cleanSheet.Cells(1, fdf).value = "Final Dilution Factor"
+    cleanSheet.Cells(1, fdf + 1).value = "Rack Number"
+    cleanSheet.Cells(1, fdf + 2).value = "Vial Number"
+    cleanSheet.Range("B2:BZ2").Font.Color = RGB(128, 128, 128)
+    
+    'collect the actual vial data (nothing is in the standards array)
+    row = FirstRow
+    col = 5
+    i = 0
+    j = 0
+    k = 0
+    l = 0
+    m = 0
+    While Not xlsht.Cells(row, colSampleLine) = ""
+    
+        If IsCalibrationStandard(CStr(xlsht.Cells(row, colSampleLine).value)) Then
+            skip = True
+            If xlsht.Cells(row, colSampleLine) = "Rinse" Or xlsht.Cells(row, colSampleLine) = "DI" Or xlsht.Cells(row, colSampleLine) = "Blank-20" Then
+                rinse = True
+            End If
+            If Not rinse Then
+                ReDim Preserve standardStorage(totalElements + 1, k)
+                ReDim Preserve standardsFontColourStorage(totalElements + 1, k)
+                ReDim Preserve stddFArray(3, m)
+                
+                j = 0
+                standardStorage(j, k) = xlsht.Cells(row, colSampleLine)
+                j = 1
+                For col = 1 To colScanMax
+                    If xlsht.Cells(NameRow, col).value <> "" Then
+                        arrSplitString = Split(CStr(xlsht.Cells(NameRow, col).value), " ")
+                        If InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ExtCal.Average") > 0 Then
+                            If arrSplitString(0) = "Y" Then
+                                standardStorage(j, k) = xlsht.Cells(row, col).value & " %" 'Format(xlsht.Cells(row, col).value, "#0.00")
+                            Else
+                                standardStorage(j, k) = Format(xlsht.Cells(row, col).value, "#0.00")
+                            End If
+                            standardsFontColourStorage(j, k) = xlsht.Cells(row, col).Font.Color
+                            j = j + 1
+                        End If
+                    End If
+                Next col
+                
+                'grab comment data at the end
+                 If Not xlsht.Cells(row, colAmount).value = "" Then
+                    standardStorage(j, k) = xlsht.Cells(row, colComment).value & " - " & xlsht.Cells(row, colAmount).value
+                Else
+                    standardStorage(j, k) = xlsht.Cells(row, colComment).value
+                End If
+                
+                stddFArray(0, m) = xlsht.Cells(row, colDilution).value
+                stddFArray(1, m) = xlsht.Cells(row, colDilution).value ' Final DF defaults to Initial
+                stddFArray(2, m) = xlsht.Cells(row, colRackNum).value ' Rack Number
+                stddFArray(3, m) = xlsht.Cells(row, colVialNum).value ' Vial Number
+                k = k + 1
+                m = m + 1
+            End If
+         End If
+         
+        
+        If Not skip Then
+            If (row <> FirstRow) Then
+                'Check to see if vial number is the same as above to account for N/A Values
+                If (xlsht.Cells(row, colSampleLine) = xlsht.Cells(row - 1, colSampleLine)) Then
+                    editFlag = True
+                End If
+            End If
+                    
+            If editFlag Then
+                i = i - 1 ' Point to the dataStorage index of the first instance
+                
+                ' --- Count N/A values in the current (duplicate ID) row ---
+                Dim naCount As Long
+                naCount = 0
+                Dim tempColForNACount As Long
+                Dim cellValueForNACount As Variant
+                
+                For tempColForNACount = 1 To colScanMax
+                    If xlsht.Cells(NameRow, tempColForNACount).value <> "" Then
+                        If InStr(1, CStr(xlsht.Cells(TypeRow, tempColForNACount).value), "ExtCal.Average") > 0 Then
+                            cellValueForNACount = xlsht.Cells(row, tempColForNACount).value
+                            If IsError(cellValueForNACount) Then ' Handle potential error values as N/A
+                                If cellValueForNACount = CVErr(xlErrNA) Then
+                                    naCount = naCount + 1
+                                End If
+                            ElseIf CStr(cellValueForNACount) = "N/A" Then
+                                naCount = naCount + 1
+                            End If
+                        End If
+                    End If
+                Next tempColForNACount
+                
+                Dim replaceDueToNAcount As Boolean
+                replaceDueToNAcount = (naCount >= 2)
+
+                Dim secondRowDF As Double
+                secondRowDF = xlsht.Cells(row, colDilution).value ' DF from the current (second) line
+
+                Dim dfUpdatedForThisSampleAsFinal As Boolean
+                dfUpdatedForThisSampleAsFinal = False
+
+                Dim colLoop As Long ' Use a different variable for this inner loop
+                Dim j_element As Long ' Use a different variable for element counter
+
+                j_element = 1   ' Element counter for dataStorage (1-based for elements)
+                
+                For colLoop = 1 To colScanMax
+                    If xlsht.Cells(NameRow, colLoop).value <> "" Then
+                        If InStr(1, CStr(xlsht.Cells(TypeRow, colLoop).value), "ExtCal.Average") > 0 Then
+                            Dim currentValueInSecondRow As Variant
+                            currentValueInSecondRow = xlsht.Cells(row, colLoop).value
+                            
+                            Dim firstInstanceSheetValue As Variant
+                            ' Assuming the duplicate ID row (current `row`) immediately follows the first instance row (`row - 1`)
+                            firstInstanceSheetValue = xlsht.Cells(row - 1, colLoop).value
+    
+                            Dim performUpdateForThisCell As Boolean
+                            performUpdateForThisCell = False
+    
+                            ' Condition 2: Overrange in first row's specific cell, and current is numeric and not N/A
+                            If CStr(firstInstanceSheetValue) = "Overrange" Then
+                                If IsNumeric(currentValueInSecondRow) And CStr(currentValueInSecondRow) <> "N/A" Then
+                                    performUpdateForThisCell = True
+                                End If
+                            End If
+    
+                            ' Condition 1: At least 2 N/A's in the second row as a whole, and current cell is not N/A
+                            If replaceDueToNAcount And CStr(currentValueInSecondRow) <> "N/A" Then
+                                'This also handles if currentValueInSecondRow is an error like #N/A from the sheet
+                                If IsError(currentValueInSecondRow) Then
+                                    If currentValueInSecondRow <> CVErr(xlErrNA) Then ' If it's an error but not #N/A, allow update
+                                         performUpdateForThisCell = True
+                                    End If
+                                Else ' Not an error, and already checked not "N/A" string
+                                    performUpdateForThisCell = True
+                                End If
+                            End If
+                            
+                            If performUpdateForThisCell Then
+                                dfUpdatedForThisSampleAsFinal = True ' Mark that an update happened for this sample
+    
+                                If j_element - 1 <= UBound(paramBArray) And j_element - 1 <= UBound(sdArray) Then 'Boundary check
+                                    If paramBArray(j_element - 1) <> 0 Then
+                                        dF = secondRowDF ' Use DF from the current (second) line
+                                        LOD = ((sdArray(j_element - 1) * 3) / paramBArray(j_element - 1)) * dF
+                                        MQL = (LOD * 10) / 3
+                                    Else
+                                        LOD = 0
+                                        MQL = 0
+                                    End If
+                                Else
+                                    LOD = 0
+                                    MQL = 0
+                                End If
+    
+                                avgVal = currentValueInSecondRow
+                                
+                                If IsNumeric(avgVal) Then
+                                    arrSplitString = Split(CStr(xlsht.Cells(NameRow, colLoop).value), " ")
+                                    If CDbl(avgVal) < LOD Then
+                                        dataStorage(j_element, i) = "<LOD " & Format(LOD, "0.0000")
+                                        dataFontColourStorage(j_element, i) = RGB(150, 150, 150)
+                                    ElseIf CDbl(avgVal) > LOD And CDbl(avgVal) < MQL Then
+                                        dataStorage(j_element, i) = "<MQL " & Format(MQL, "0.0000")
+                                        dataFontColourStorage(j_element, i) = RGB(150, 150, 150)
+                                    Else
+                                        If arrSplitString(0) = "Y" Or arrSplitString(0) = "Sc" Or arrSplitString(0) = "In" Then
+                                            dataStorage(j_element, i) = avgVal & " %"
+                                        Else
+                                            dataStorage(j_element, i) = avgVal
+                                        End If
+                                        dataFontColourStorage(j_element, i) = xlsht.Cells(row, colLoop).Font.Color
+                                    End If
+                                Else
+                                    dataStorage(j_element, i) = avgVal
+                                    dataFontColourStorage(j_element, i) = xlsht.Cells(row, colLoop).Font.Color
+                                End If
+                            End If
+                            j_element = j_element + 1
+                        End If
+                        
+                        ' === RECOVERY PERCENTAGE (Calibration & Spikes) ===
+                        If InStr(1, CStr(xlsht.Cells(TypeRow, colLoop).value), "RecoveryPercentage") > 0 Then
+                            Dim testGroupLoop As String
+                            testGroupLoop = CStr(xlsht.Cells(2, colLoop).value)
+                            
+                            ' ONLY process Recovery Percentages for Calibration and Spike Tests
+                            If InStr(1, testGroupLoop, "Calibration Test") > 0 Or InStr(1, testGroupLoop, "Spike Test") > 0 Then
+                                
+                                arrSplitString = Split(CStr(xlsht.Cells(NameRow, colLoop).value), " ")
+                                
+                                ' Search for the element index that matches BOTH name and wavelength
+                                For findEle = LBound(firstRowArray) To UBound(firstRowArray)
+                                    If firstRowArray(findEle) = arrSplitString(0) Then
+                                        If WaveLengthArray(findEle) = arrSplitString(1) Then
+                                            
+                                            Dim cellValLoop As Variant
+                                            Dim skipOverwriteLoop As Boolean
+                                            skipOverwriteLoop = False
+                                            
+                                            cellValLoop = xlsht.Cells(row, colLoop).value
+                                            
+                                            ' Determine if we should skip replacing the measured quantity
+                                            If IsError(cellValLoop) Then
+                                                skipOverwriteLoop = True
+                                            ElseIf Trim(CStr(cellValLoop)) = "" Then
+                                                skipOverwriteLoop = True
+                                            ElseIf IsNumeric(Trim(CStr(cellValLoop))) Then
+                                                If CDbl(Trim(CStr(cellValLoop))) = 0 Then
+                                                    skipOverwriteLoop = True
+                                                End If
+                                            End If
+                                            
+                                            ' If it's a valid percentage, append the % sign
+                                            If Not skipOverwriteLoop Then
+                                                dataStorage(findEle + 1, i) = Trim(CStr(cellValLoop)) & " %"
+                                            End If
+                                            
+                                            Exit For
+                                        End If
+                                    End If
+                                Next findEle
+                                
+                            End If
+                        End If
+                        ' ==========================================================
+                    End If
+                Next colLoop
+                
+                If dfUpdatedForThisSampleAsFinal Then
+                    dFArray(1, i) = secondRowDF ' Update the final dilution factor for sample i
+                End If
+
+            Else
+               ' This is the block for a new sample (not a duplicate row), or first time seeing a sample ID
+               ReDim Preserve dataStorage(totalElements + 1, i)
+               ReDim Preserve dataFontColourStorage(totalElements + 1, i)
+               ReDim Preserve dFArray(3, i) ' dFArray is 0-indexed for second dim, matching i. Dimension to hold DF, Rack, and Vial
+
+               j = 0   ' For dataStorage: 0 is SampleLine, 1+ are elements
+               dataStorage(j, i) = xlsht.Cells(row, colSampleLine).value ' Sample ID
+               j = 1 ' Start with the first element
+               
+               For col = 1 To colScanMax
+                   If xlsht.Cells(NameRow, col).value <> "" Then
+                       arrSplitString = Split(CStr(xlsht.Cells(NameRow, col).value), " ")
+                       If InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ExtCal.Average") > 0 Then
+                           If j - 1 <= UBound(paramBArray) And j - 1 <= UBound(sdArray) Then 'Boundary check
+                               If paramBArray(j - 1) <> 0 Then
+                                   dF = xlsht.Cells(row, colDilution).value
+                                   LOD = ((sdArray(j - 1) * 3) / paramBArray(j - 1)) * dF
+                                   MQL = (LOD * 10) / 3
+                                Else
+                                   LOD = 0
+                                   MQL = 0
+                                End If
+                           Else
+                               LOD = 0
+                               MQL = 0
+                           End If
+                           
+                           avgVal = xlsht.Cells(row, col).value
+                           If IsNumeric(avgVal) Then
+                               If CDbl(avgVal) < LOD Then
+                                   dataStorage(j, i) = "<LOD " & Format(LOD, "0.0000")
+                                   dataFontColourStorage(j, i) = RGB(150, 150, 150)
+                               ElseIf CDbl(avgVal) > LOD And CDbl(avgVal) < MQL Then
+                                   dataStorage(j, i) = "<MQL " & Format(MQL, "0.0000")
+                                   dataFontColourStorage(j, i) = RGB(150, 150, 150)
+                               Else
+                                    If arrSplitString(0) = "Y" Or arrSplitString(0) = "Sc" Or arrSplitString(0) = "In" Then
+                                       dataStorage(j, i) = avgVal & " %"
+                                    Else
+                                       dataStorage(j, i) = avgVal
+                                    End If
+                                   dataFontColourStorage(j, i) = xlsht.Cells(row, col).Font.Color
+                               End If
+                           Else
+                               dataStorage(j, i) = avgVal
+                               dataFontColourStorage(j, i) = xlsht.Cells(row, col).Font.Color
+                           End If
+                           j = j + 1
+                       End If
+                       
+                       ' === RECOVERY PERCENTAGE (Calibration & Spikes) ===
+                       If InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "RecoveryPercentage") > 0 Then
+                           Dim testGroup As String
+                           testGroup = CStr(xlsht.Cells(2, col).value)
+                           
+                           ' ONLY process Recovery Percentages for Calibration and Spike Tests
+                           If InStr(1, testGroup, "Calibration Test") > 0 Or InStr(1, testGroup, "Spike Test") > 0 Then
+                               
+                               arrSplitString = Split(CStr(xlsht.Cells(NameRow, col).value), " ")
+                               
+                               ' Search for the element index that matches BOTH name and wavelength
+                               For findEle = LBound(firstRowArray) To UBound(firstRowArray)
+                                   If firstRowArray(findEle) = arrSplitString(0) Then
+                                       If WaveLengthArray(findEle) = arrSplitString(1) Then
+                                           
+                                           Dim cellVal As Variant
+                                           Dim skipOverwrite As Boolean
+                                           skipOverwrite = False
+                                           
+                                           cellVal = xlsht.Cells(row, col).value
+                                           
+                                           ' Determine if we should skip replacing the measured quantity
+                                           If IsError(cellVal) Then
+                                               skipOverwrite = True
+                                           ElseIf Trim(CStr(cellVal)) = "" Then
+                                               skipOverwrite = True
+                                           ElseIf IsNumeric(Trim(CStr(cellVal))) Then
+                                               If CDbl(Trim(CStr(cellVal))) = 0 Then
+                                                   skipOverwrite = True
+                                               End If
+                                           End If
+                                           
+                                           ' If it's a valid percentage, append the % sign
+                                           If Not skipOverwrite Then
+                                               dataStorage(findEle + 1, i) = Trim(CStr(cellVal)) & " %"
+                                           End If
+                                           
+                                           Exit For
+                                       End If
+                                   End If
+                               Next findEle
+                               
+                           End If
+                       End If
+                       ' ==========================================================
+                   End If
+               Next col
+               
+               'grab comment data and put it at the end
+               j = totalElements + 1
+               If Not xlsht.Cells(row, colAmount).value = "" Then
+                    dataStorage(j, i) = xlsht.Cells(row, colComment).value & " - " & xlsht.Cells(row, colAmount).value
+               Else
+                    dataStorage(j, i) = xlsht.Cells(row, colComment).value
+               End If
+                 
+               dFArray(0, i) = xlsht.Cells(row, colDilution).value ' Initial DF for sample i
+               dFArray(1, i) = xlsht.Cells(row, colDilution).value ' Initialize Final DF as Initial
+               dFArray(2, i) = xlsht.Cells(row, colRackNum).value ' Rack Number
+               dFArray(3, i) = xlsht.Cells(row, colVialNum).value ' Vial Number
+
+               l = l + 1
+            End If
+            i = i + 1
+        End If
+        row = row + 1
+        editFlag = False
+        skip = False
+         rinse = False
+    Wend
+    
+    
+    j = 0
+    i = 0
+    row = DataRow
+    col = 1
+    'insert the non-standards data
+    For j = 0 To UBound(dataStorage, 1)
+        If j = UBound(dataStorage, 1) Then
+            col = 2 'comments column
+        End If
+        For i = 0 To UBound(dataStorage, 2)
+            If dataStorage(j, i) <> "N/A" Then
+                cleanSheet.Cells(row, col).value = dataStorage(j, i)
+                If InStr(dataStorage(j, i), "%") > 0 Then
+                'Do nothing
+                Else
+                    cleanSheet.Cells(row, col).NumberFormat = "#0.00"
+                End If
+                cleanSheet.Cells(row, col).Font.Color = dataFontColourStorage(j, i)
+            Else
+                cleanSheet.Cells(row, col).value = ""
+             End If
+            row = row + 1
+        Next i
+        row = DataRow
+        If j <> UBound(dataStorage, 1) And j < UBound(elementArray, 1) Then
+            If elementArray(j) <> "" Then
+                col = elementArray(j)
+             End If
+        End If
+    Next j
+    With Sheets("Clean Data").Range(Cells(row + UBound(dataStorage, 2), 1), Cells(row, 100)).Borders(xlEdgeBottom)
+        .LineStyle = xlContinuous
+        .Weight = xlThick
+    End With
+    
+    j = 0
+    i = 0
+    col = 1
+    row = row + UBound(dataStorage, 2) + 1
+    'insert the standards data
+    For j = 0 To UBound(standardStorage, 1)
+        If j = UBound(dataStorage, 1) Then
+            col = 2 'comments column
+        End If
+        For i = 0 To UBound(standardStorage, 2)
+            If standardStorage(j, i) <> "N/A" Then
+                cleanSheet.Cells(row, col).value = standardStorage(j, i)
+                If InStr(standardStorage(j, i), "%") > 0 Then 'CHANGE
+                'Do nothing
+                Else
+                    cleanSheet.Cells(row, col).NumberFormat = "#0.00"
+                End If
+                'cleanSheet.Cells(row, col).NumberFormat = "#0.00"
+                cleanSheet.Cells(row, col).Font.Color = standardsFontColourStorage(j, i)
+            Else
+                cleanSheet.Cells(row, col).value = ""
+            End If
+            row = row + 1
+         Next i
+        row = UBound(dataStorage, 2) + DataRow + 1
+        If j <= UBound(elementArray, 1) Then
+            col = elementArray(j)
+        End If
+    Next j
+    
+    Dim cText As String
+    
+    i = 0
+    For i = 0 To UBound(dFArray, 2)
+        ' 1. Print the columns as usual
+        cleanSheet.Cells(DataRow + i, idf).value = dFArray(0, i)
+        cleanSheet.Cells(DataRow + i, fdf).value = dFArray(1, i)
+        cleanSheet.Cells(DataRow + i, fdf + 1).value = dFArray(2, i) ' Rack Number
+        cleanSheet.Cells(DataRow + i, fdf + 2).value = dFArray(3, i) ' Vial Number
+        
+        ' 2. Create and attach the hover-note to the Sample ID (Column A / 1)
+        cText = "Initial DF: " & dFArray(0, i) & vbCrLf & _
+                "Final DF: " & dFArray(1, i) & vbCrLf & _
+                "Rack #: " & dFArray(2, i) & vbCrLf & _
+                "Vial #: " & dFArray(3, i)
+                
+        With cleanSheet.Cells(DataRow + i, 1)
+            .ClearComments
+            .AddComment Text:=cText
+            .Comment.Shape.TextFrame.AutoSize = True
+        End With
+    Next i
+    
+    placeholder = i
+    For i = 0 To UBound(stddFArray, 2)
+        ' 1. Print the columns as usual
+        cleanSheet.Cells(placeholder + DataRow + i, idf).value = stddFArray(0, i)
+        cleanSheet.Cells(placeholder + DataRow + i, fdf).value = stddFArray(1, i)
+        cleanSheet.Cells(placeholder + DataRow + i, fdf + 1).value = stddFArray(2, i) ' Rack Number
+        cleanSheet.Cells(placeholder + DataRow + i, fdf + 2).value = stddFArray(3, i) ' Vial Number
+        
+        ' 2. Create and attach the hover-note to the Sample ID (Column A / 1)
+        cText = "Initial DF: " & stddFArray(0, i) & vbCrLf & _
+                "Final DF: " & stddFArray(1, i) & vbCrLf & _
+                "Rack #: " & stddFArray(2, i) & vbCrLf & _
+                "Vial #: " & stddFArray(3, i)
+                
+        With cleanSheet.Cells(placeholder + DataRow + i, 1)
+            .ClearComments
+            .AddComment Text:=cText
+            .Comment.Shape.TextFrame.AutoSize = True
+        End With
+    Next i
+    
+    ' ==========================================================================
+    ' POST-PROCESSING SORT: Locks template elements to front, groups ad-hoc items after
+    ' ==========================================================================
+    
+    ' The first row is the STRICT TEMPLATE ORDER.
+    ' Everything after "S" is the rest of the periodic table to cleanly group any one-offs.
+    ' Note: Delete internal standards from the sortOrder array; they are excluded here because Loop 2 pins them to the absolute end.
+    
+    sortOrder = Array("Li", "Na", "K", "Mg", "Ca", "Sr", "Ba", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "B", "Al", "Si", "P", "As", "S", _
+                      "H", "Rb", "Cs", "Fr", "Be", "Ra", "Sc", "Zr", "Hf", "Rf", "Nb", "Ta", "Db", "Mo", "W", "Sg", "Tc", "Re", "Bh", "Ru", "Os", "Hs", _
+                      "Rh", "Ir", "Mt", "Pd", "Pt", "Ds", "Ag", "Au", "Rg", "Cd", "Hg", "Cn", "Ga", "In", "Tl", "Nh", "C", "Ge", "Sn", "Pb", "Fl", _
+                      "N", "Sb", "Bi", "Mc", "O", "Se", "Te", "Po", "Lv", "F", "Cl", "Br", "I", "At", "Ts", "He", "Ne", "Ar", "Kr", "Xe", "Rn", _
+                      "Og", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Ac", "Th", "Pa", "U", _
+                      "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr")
+                      
+    currentTargetCol = 3 ' Start placing elements dynamically after the comments (Column C)
+    
+    ' UPDATED SORTING LOGIC: RESTART LOOP TO CATCH STRAGGLERS
+    For x = LBound(sortOrder) To UBound(sortOrder)
+        
+        Do
+            foundMatch = False
+            ' Find the last used column to define the search range
+            maxCol = cleanSheet.Cells(1, cleanSheet.Columns.Count).End(xlToLeft).column
+            
+            ' Search from the current target column to the right
+            For colScan = currentTargetCol To maxCol
+                headerVal = Trim(CStr(cleanSheet.Cells(1, colScan).value))
+                splitVal = Split(headerVal, " ")
+                
+                ' Check if this column matches the current element we are sorting
+                 If UBound(splitVal) >= 0 Then
+                    If splitVal(0) = sortOrder(x) Then
+                        foundMatch = True
+                        
+                        ' If the column is not already in the correct position, move it
+                        If colScan > currentTargetCol Then
+                            cleanSheet.Columns(colScan).Cut
+                            cleanSheet.Columns(currentTargetCol).Insert Shift:=xlToRight
+                        End If
+                        
+                        ' Advance the target column
+                        currentTargetCol = currentTargetCol + 1
+                        
+                        ' Exit the For loop to restart the search because columns have shifted
+                        Exit For
+                    End If
+                End If
+            Next colScan
+            
+        Loop While foundMatch = True ' Continue searching for the SAME element until no more are found
+        
+    Next x
+    
+    ' ==========================================================================
+    ' HIGHLIGHT ONE-OFF ANALYTES (Visual flag for ad-hoc elements)
+    ' ==========================================================================
+    
+    ' Your core 22 template elements. Anything NOT in this list gets highlighted.
+    templateArr = Array("Li", "Na", "K", "Mg", "Ca", "Sr", "Ba", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "B", "Al", "Si", "P", "As", "S")
+    
+    ' Find where the analytes end (right before Initial Dilution Factor)
+    For colScan = 3 To maxCol
+        If Trim(CStr(cleanSheet.Cells(1, colScan).value)) = "Initial Dilution Factor" Then
+            endCol = colScan - 1
+            Exit For
+        End If
+    Next colScan
+    
+    ' Sweep through the analytes and highlight the headers of the one-offs
+    For colIndex = 3 To endCol
+        elName = Trim(CStr(cleanSheet.Cells(1, colIndex).value))
+        splitVal = Split(elName, " ")
+        
+        If UBound(splitVal) >= 0 Then
+            ' If it's NOT a template element, and NOT an internal standard...
+            If Not inArray(splitVal(0), templateArr) And splitVal(0) <> "Y" And splitVal(0) <> "Sc" And splitVal(0) <> "In" Then
+                ' Paint the header rows (1 through 7) a soft lavender
+                cleanSheet.Range(cleanSheet.Cells(1, colIndex), cleanSheet.Cells(3, colIndex)).Interior.Color = RGB(230, 230, 250)
+            End If
+        End If
+    Next colIndex
+    
+    ' ==========================================================================
+    ' --- APPLY ROW-BASED INTERIOR COLOR ---
+    ' ==========================================================================
+    Dim r As Long
+    Dim lastPopulatedRow As Long
+    Dim sampleLineValue As String
+    Dim targetRange As Range
+
+    ' Determine the last row with data in Column A (SampleLine)
+    If cleanSheet.Cells(cleanSheet.Rows.Count, 1).End(xlUp).row < DataRow Then
+        ' Handles case where no data samples were processed below DataRow
+        ' though this is unlikely if the macro ran successfully to this point with data.
+        lastPopulatedRow = DataRow
+    Else
+        lastPopulatedRow = cleanSheet.Cells(cleanSheet.Rows.Count, 1).End(xlUp).row
+    End If
+    
+    ' Loop from the first data row to the last populated row on cleanSheet
+    For r = DataRow To lastPopulatedRow
+        sampleLineValue = Trim(CStr(cleanSheet.Cells(r, 1).value)) ' Get SampleLine from Column A
+
+        ' Define the range for the current row from column A to BZ
+        Set targetRange = cleanSheet.Range("A" & r & ":BZ" & r) ' RANGE TO BZ
+
+        ' Check if SampleLine contains any of the specified strings
+        If InStr(1, sampleLineValue, "CCB", vbTextCompare) > 0 Or _
+            InStr(1, sampleLineValue, "ICV", vbTextCompare) > 0 Or _
+            InStr(1, sampleLineValue, "CCV", vbTextCompare) > 0 Or _
+            InStr(1, sampleLineValue, "Spike", vbTextCompare) > 0 Or _
+            InStr(1, sampleLineValue, "EXTQC", vbTextCompare) > 0 Then
+            targetRange.Interior.Color = RGB(255, 236, 239) ' Light Pink
+        ElseIf InStr(1, sampleLineValue, "STD1", vbTextCompare) > 0 Or _
+            InStr(1, sampleLineValue, "STD2", vbTextCompare) > 0 Or _
+            InStr(1, sampleLineValue, "STD", vbTextCompare) > 0 Then
+            targetRange.Interior.Color = RGB(255, 255, 224) ' Light Yellow
+        ElseIf InStr(1, sampleLineValue, "Blank-", vbTextCompare) > 0 Then
+            targetRange.Interior.Color = RGB(216, 232, 243) ' Light Blue
+        Else
+            targetRange.Interior.ColorIndex = xlNone ' Clear fill for other rows
+        End If
+    Next r
+    ' --- END OF NEW SECTION ---
+    
+    cleanSheet.Range("A1:BZ1001").EntireColumn.AutoFit ' RANGE TO BZ
+    ' cleanSheet.Range("B3:AZ1001").NumberFormat = "#0.00"
+    
+    ' ==========================================================================
+    ' HIDE OR DELETE NON-PREFERRED WAVELENGTHS (MUST happen after AutoFit!)
+    ' ==========================================================================
+
+    ' CRITICAL RULE FOR DELETING: We must loop BACKWARDS (Step -1)
+    ' Otherwise, deleting a column shifts everything left and we skip columns!
+    For colIndex = maxCol To 3 Step -1
+        elName = Trim(CStr(cleanSheet.Cells(1, colIndex).value))
+        elWave = Trim(CStr(cleanSheet.Cells(2, colIndex).value))
+
+        If elName <> "" And elName <> "Initial Dilution Factor" And elName <> "Comments" Then
+            
+            keepWave = "" ' Reset for each column
+            
+            Select Case elName
+                ' *** EDIT THESE TO MATCH YOUR VALIDATED LAB METHOD ***
+                Case "Li": keepWave = "670.776"
+                Case "Na": keepWave = "589.592"
+                Case "K":  keepWave = "766.490"
+                Case "Mg": keepWave = "383.826"
+                Case "Ca": keepWave = "422.673"
+                Case "Sr": keepWave = "421.552"
+                Case "Ba": keepWave = "233.527"
+                Case "Ti": keepWave = "334.941"
+                Case "V":  keepWave = "292.402"
+                Case "Cr": keepWave = "283.563"
+                Case "Mn": keepWave = "260.569"
+                Case "Fe": keepWave = "259.940"
+                Case "Co": keepWave = "230.786"
+                Case "Ni": keepWave = "231.604"
+                Case "Cu": keepWave = "324.754"
+                Case "Zn": keepWave = "213.856"
+                Case "B":  keepWave = "249.773"
+                Case "Al": keepWave = "308.215"
+                Case "Si": keepWave = "251.611"
+                Case "P":  keepWave = "177.495"
+                Case "As": keepWave = "189.042"
+                Case "S":  keepWave = "182.034"
+                
+                Case Else
+                    ' Lanthanides, Internal Stds, or any forgotten elements land here
+                    keepWave = "UNKNOWN"
+            End Select
+
+            ' Process the column using Val() to bypass trailing zero formatting issues
+            If keepWave <> "UNKNOWN" Then
+                If Val(elWave) <> Val(keepWave) Then
+                    
+                    ' ========================================================
+                    ' TOGGLE BEHAVIOR HERE: Comment out the one you DO NOT want
+                    ' ========================================================
+                    
+                    ' OPTION A: Hide the column
+                    'cleanSheet.Columns(colIndex).Hidden = True
+                    
+                    ' OPTION B: Delete the column
+                    cleanSheet.Columns(colIndex).Delete
+                    
+                    ' ========================================================
+                End If
+            End If
+            
+        End If
+    Next colIndex
+    ' ==========================================================================
+     
+    ' Freeze panes on cleanSheet at C8 (DataRow is 8)
+    Application.StatusBar = "Freezing panes on Clean Data sheet..." ' Optional status update
+    With ActiveWindow
+        cleanSheet.Activate ' Ensure cleanSheet is active for ActiveWindow context
+        If .FreezePanes Then .FreezePanes = False ' Unfreeze if already frozen from a previous run
+        cleanSheet.Cells(DataRow, "C").Select     ' Selects cell C8 (since DataRow = 8)
+        .FreezePanes = True
+    End With
+
+    ' Freeze panes on xlsht (raw data sheet) at roughly the data start
+    Application.StatusBar = "Freezing panes on raw data sheet..." ' Optional status update
+    With ActiveWindow
+        xlsht.Activate ' Ensure raw data sheet is active for ActiveWindow context
+        If .FreezePanes Then .FreezePanes = False ' Unfreeze if already frozen
+        xlsht.Cells(5, "H").Select
+        ' Selects cell H5
+        .FreezePanes = True
+    End With
+    
+    ' Optionally, activate the cleanSheet again to leave it as the active one for the user.
+    ' This also influences which sheet is active if the CSV save relied on 'ActiveSheet'.
+    cleanSheet.Activate
+    Application.StatusBar = False ' Clear status bar
+    
+    Dim SaveToDirectory As String
+    Dim CurrentWorkbookName As String
+    Dim CurrentWorkbook As Workbook
+    Dim wsToExport As Worksheet
+    
+    Set CurrentWorkbook = ActiveWorkbook
+    CurrentWorkbookName = CurrentWorkbook.Name
+    CurrentWorkbookName = Replace(CurrentWorkbookName, ".xml", "")
+    
+    ' Store current details for the workbook
+    Application.DisplayAlerts = False
+    CurrentWorkbook.Save
+    Application.DisplayAlerts = True
+    
+    Set wsToExport = ActiveSheet
+    Dim UserName As String
+    UserName = Environ("USERNAME")
+    SaveToDirectory = "C:\Users\" & UserName & "\Summit Nanotech Corporation\Research & Development - Documents\02 - Lab Instrument Analysis\01 - Internal\01 - ICP-OES\01 - Results\CleanCSVsForLUCAN\" & CStr(CurrentWorkbookName)
+    
+    ' Copy sheet to a background workbook to save CSV without changing active view
+    wsToExport.Copy
+    Dim tempWB As Workbook
+    Set tempWB = ActiveWorkbook
+    
+    Application.DisplayAlerts = False
+    tempWB.SaveAs Filename:=SaveToDirectory, FileFormat:=xlCSV
+    tempWB.Close SaveChanges:=False
+    Application.DisplayAlerts = True
+    
+    CurrentWorkbook.Activate
+    wsToExport.Activate
+    
+CleanExit:
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.DisplayAlerts = True
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "An error occurred: " & Err.Description & " (Error " & Err.Number & ")", vbCritical, "Macro Error"
+    GoTo CleanExit
+
+End Sub
 
