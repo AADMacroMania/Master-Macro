@@ -26,6 +26,37 @@
 'Updated May 2026 by Michaela Schmidt
     'ICP - Revised to handle any new analyte or new calibration standards, merged functionality between normal macro and rare earths version, and eliminated extra macro
     'ICP - Updated to support both Standard and Automatic XML Formats
+'Updated May 2026 (Claude)
+    'ICP - Derive Clean Data font colours from measurement metadata (RSD / % recovery)
+    '      via CleanFontColor() instead of copying colours from the source cell.
+    'ICP - Accept an uncoloured .csv input (metadata at the far right) in addition to
+    '      the .xml input; metadata columns are now located across the full width.
+    'ICP - Auto-split a semicolon .csv that opened unsplit into column A.
+    'ICP - Output: save the workbook (raw + Clean Data tabs) as .xlsx in the source
+    '      folder and delete the original .xml/.csv; removed the CleanCSVsForLUCAN export.
+    'ICP - Name the raw tab after the file (not "Test") so .xml and .csv outputs match.
+    'ICP - Internal standard: use only Y 371.030 (drop Y 360.073) and split it into
+    '      initial/final dilution columns beside the DF columns, like ICP_CleanData.py.
+    'ICP - Final DF left blank when there is no 2nd injection (no intelligent dilution).
+    'ICP - Sample-ID hover note now includes the internal-standard recovery per dilution
+    '      e.g. "Initial DF: 17.5 (98.65% ISR)". Raw-tab freeze panes moved to C5.
+    'ICP - Hardened all cell-value text conversions/concatenations (SafeText) and the
+    '      DF/note builder against Excel error cells to avoid a Type-mismatch (Error 13).
+    '      Y recovery is formatted to 2 dp at capture; error popup reports the stage.
+    'ICP - Removed the trailing Y / Initial DF / Final DF / Rack / Vial columns; all of
+    '      that now lives in the Sample-ID hover note, which gains Manual DF & prepFAST
+    '      DF (Manual = Total/prepFAST) indented under each of Initial/Final, and shows
+    '      "N/A" for Final when there is no 2nd injection.
+    'ICP - Sample-ID text is coloured by the worst Y371 IS quality across both dilutions
+    '      (amber = RSD 3-10 or recovery a bit off; red = RSD >10 or recovery a lot off).
+    '      Hover note shows "Y371: <rec>% ISR (1 dp), <rsd>% RSD" with a warning triangle
+    '      after whichever flags. Numbers print cleanly (no trailing "."); raw tab col B
+    '      auto-fits; dead Y-column code removed.
+    'ICP - Standardised the font to Aptos Narrow 11 on both the Clean Data and raw
+    '      tabs (was Calibri with size-10 header cells).
+    'ICP - Wavelength cells gain a calibration hover-note (A/B/C intercept/linear/
+    '      quadratic, RSE, R2, and Linear vs Second-order fit) read from the STD row.
+    '      Shortened the LOD/MQL formula labels so they fit column B.
 
 Option Explicit
 
@@ -35,7 +66,7 @@ Const lastRow As Long = 1001                                                    
 Const FirstCol As Long = 2                                                      ' first column to start placing data in report
 Const lastCol As Long = 28                                                      ' last column to end placing of data in report
 Const NameRow As Long = 3                                                       ' select which row contains element data
-Const DataRow As Long = 8                                                       ' First row for data insertion after the headers
+Const dataRow As Long = 8                                                       ' First row for data insertion after the headers
 Const TypeRow As Long = 1                                                       ' Row that has the type of data included
 
 ' global sheet variables
@@ -116,6 +147,19 @@ Sub ICPCleanData()
     Application.ScreenUpdating = False
         
     Set xlsht = ActiveSheet
+
+    ' A semicolon-delimited .csv opened in a comma-locale Excel lands entirely in
+    ' column A. Detect that (cell A1 still contains ";") and split it in place so
+    ' the rest of the macro sees the normal column layout - no manual
+    ' Data > Text to Columns step required.
+    If InStr(1, CStr(xlsht.Cells(1, 1).value), ";") > 0 Then
+        xlsht.Columns(1).TextToColumns _
+            Destination:=xlsht.Cells(1, 1), _
+            DataType:=xlDelimited, _
+            Semicolon:=True, Comma:=False, Tab:=False, Space:=False, Other:=False, _
+            ConsecutiveDelimiter:=False
+    End If
+
     Sheets.Add.Name = "Clean Data"
 
     Set cleanSheet = Sheets("Clean Data")
@@ -123,20 +167,28 @@ Sub ICPCleanData()
     ' === DYNAMIC COLUMN LOCATOR LOGIC ===
     Dim colSampleLine As Integer, colComment As Integer, colAmount As Integer
     Dim colDilution As Integer, colRackNum As Integer, colVialNum As Integer
+    Dim colPrep As Integer   ' prepFAST DF column (Total DF = Manual DF x prepFAST DF)
     Dim colScanMax As Long, cSearch As Integer
     
     ' Determine max column from Row 1
     colScanMax = xlsht.Cells(1, xlsht.Columns.Count).End(xlToLeft).column
     If colScanMax < 50 Then colScanMax = 500
     
-    ' Dynamic detection for metadata
-    For cSearch = 1 To 30
-        If Trim(xlsht.Cells(2, cSearch).value) = "SampleLine" Then colSampleLine = cSearch
-        If Trim(xlsht.Cells(2, cSearch).value) = "Comment" Then colComment = cSearch
-        If Trim(xlsht.Cells(3, cSearch).value) = "Amount" Then colAmount = cSearch
-        If InStr(Trim(xlsht.Cells(3, cSearch).value), "Total Dilution Factor") > 0 Then colDilution = cSearch
-        If Trim(xlsht.Cells(2, cSearch).value) = "Rack Number" Then colRackNum = cSearch
-        If Trim(xlsht.Cells(2, cSearch).value) = "Vial Numbers" Then colVialNum = cSearch
+    ' Dynamic detection for metadata. Scans the FULL width and accepts both the
+    ' XML layout (metadata in the first columns, header "SampleLine") and the CSV
+    ' layout (metadata at the far right, header "Label"). First match wins, so an
+    ' XML file keeps using "SampleLine" even though it also has a "Label" column.
+    Dim h2 As String, h3 As String
+    For cSearch = 1 To colScanMax
+        h2 = Trim(CStr(xlsht.Cells(2, cSearch).value))
+        h3 = Trim(CStr(xlsht.Cells(3, cSearch).value))
+        If colSampleLine = 0 And (h2 = "SampleLine" Or h2 = "Label") Then colSampleLine = cSearch
+        If colComment = 0 And h2 = "Comment" Then colComment = cSearch
+        If colAmount = 0 And h3 = "Amount" Then colAmount = cSearch
+        If colDilution = 0 And InStr(h3, "Total Dilution Factor") > 0 Then colDilution = cSearch
+        If colRackNum = 0 And h2 = "Rack Number" Then colRackNum = cSearch
+        If colVialNum = 0 And h2 = "Vial Numbers" Then colVialNum = cSearch
+        If colPrep = 0 And h2 = "prepFAST DF" Then colPrep = cSearch
     Next cSearch
     
     ' Fallback values to Original Standard File config
@@ -156,12 +208,14 @@ Sub ICPCleanData()
     cleanSheet.Cells(5, 1).value = "LOD (17.5x dilution)"
     cleanSheet.Cells(6, 1).value = "MQL (1x dilution)"
     cleanSheet.Cells(7, 1).value = "MQL (17.5x dilution)"
-    cleanSheet.Cells(4, 2).value = "LOD=SD_Blank*TDF*3/Slope"
-    cleanSheet.Cells(6, 2).value = "MQL=LOD*TDF*10/3"
+    ' LOD = SD(blank) . TDF . 3 / B  ("BLK" is subscripted further below, after the
+    ' sheet-wide font pass, so it isn't flattened); MQL = LOD . 10 / 3.
+    cleanSheet.Cells(4, 2).value = "LOD=SDBLK" & ChrW(183) & "TDF" & ChrW(183) & "3/B"
+    cleanSheet.Cells(6, 2).value = "MQL=LOD" & ChrW(183) & "10/3"
     
     ' === RANGE EXTENDED TO BZ ===
     cleanSheet.Range("B1:BZ1").Font.Bold = True
-    cleanSheet.Range("B2:BZ6").Font.Size = 10
+    cleanSheet.Range("B2:BZ6").Font.Size = 11
     cleanSheet.Range("B2:BZ3").Font.Color = 15
     cleanSheet.Range("B1:BZ1001").HorizontalAlignment = xlCenter
     cleanSheet.Range("A4:BZ7").Interior.Color = RGB(242, 242, 242)
@@ -174,7 +228,7 @@ Sub ICPCleanData()
                 Application.DisplayAlerts = False
                 Sheets("Clean Data").Delete
                 Application.DisplayAlerts = True
-            MsgBox "Blank-20 sample missing from raw results." & vbNewLine & "Please insert most recent Blank-20 from previous analysis." & vbNewLine & vbNewLine & "Falta la muestra del Blank-20 en los resultados brutos." & vbNewLine & "Inserte el Blank-20 más reciente del análisis anterior.", vbExclamation, "Missing Sample"
+            MsgBox "Blank-20 sample missing from raw results." & vbNewLine & "Please insert most recent Blank-20 from previous analysis." & vbNewLine & vbNewLine & "Falta la muestra del Blank-20 en los resultados brutos." & vbNewLine & "Inserte el Blank-20 mÃ¡s reciente del anÃ¡lisis anterior.", vbExclamation, "Missing Sample"
             Exit Sub
         End If
         blankRow = FindRow.row
@@ -189,6 +243,33 @@ Sub ICPCleanData()
     i = 0
     sd = 0
     pb = 0
+    ' Calibration parameters captured from the STD row (paramBRow), aligned to the
+    ' element order, for the wavelength-cell hover-note. Each is optional.
+    Dim pa As Integer, pc As Integer, rseI As Integer, codI As Integer
+    Dim paramAArray() As Variant, paramCArray() As Variant
+    Dim rseArray() As Variant, codArray() As Variant
+    pa = 0: pc = 0: rseI = 0: codI = 0
+    ' Per-analyte lookups (keyed by the full NameRow string, e.g.
+    ' "Li 670.776 (Aqueous-Radial-iFR)") used to derive font colour from the
+    ' measurement metadata instead of copying it from the source cell.
+    Dim rsdColDict As Object, recColDict As Object
+    Set rsdColDict = CreateObject("Scripting.Dictionary")   ' analyte -> ExtCal.RSD column
+    Set recColDict = CreateObject("Scripting.Dictionary")   ' analyte -> Calibration/Spike recovery column
+    Dim recSubLbl As String
+    ' Internal-standard (Y371 = Y 371.030) handling: its recovery (ExtCal.Average) and
+    ' conc RSD (ExtCal.RSD) are captured per dilution and reported in the hover note;
+    ' they also drive the Sample-ID font colour. Y 360.073 is dropped.
+    Dim yCol371 As Long, yRsdCol371 As Long
+    yCol371 = 0: yRsdCol371 = 0
+    Dim yInitRec() As Variant, yInitRSD() As Variant
+    Dim yFinalRec() As Variant, yFinalRSD() As Variant
+    Dim yStdRec() As Variant, yStdRSD() As Variant
+    Dim hasFinal() As Boolean   ' True once a 2nd injection (intelligent dilution) is seen
+    ' Dilution detail for the hover note (Total DF, prepFAST DF -> Manual DF = Total/prepFAST)
+    Dim prepInit() As Variant, totFinal() As Variant, prepFinal() As Variant
+    Dim prepStdInit() As Variant
+    Dim dbgStage As String      ' tracks progress so the error handler can report where it failed
+    dbgStage = "init"
     ' Gather headers correctly accounting for potential space columns
     For col = 1 To colScanMax
         If xlsht.Cells(NameRow, col).value <> "" Then
@@ -199,7 +280,20 @@ Sub ICPCleanData()
                 ReDim Preserve WaveLengthArray(i)
                 firstRowArray(i) = arrSplitString(0)
                 WaveLengthArray(i) = arrSplitString(1)
+                If arrSplitString(0) = "Y" And arrSplitString(1) = "371.030" Then yCol371 = col
                 i = i + 1
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ExtCal.RSD") <> 0 Then
+                rsdColDict(CStr(xlsht.Cells(NameRow, col).value)) = col
+                If arrSplitString(0) = "Y" And arrSplitString(1) = "371.030" Then yRsdCol371 = col
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "RecoveryPercentage") <> 0 Then
+                recSubLbl = CStr(xlsht.Cells(2, col).value)
+                ' Prefer the Calibration Test recovery; fall back to the Spike Test.
+                If InStr(1, recSubLbl, "Calibration Test") > 0 Then
+                    recColDict(CStr(xlsht.Cells(NameRow, col).value)) = col
+                ElseIf InStr(1, recSubLbl, "Spike Test") > 0 Then
+                    If Not recColDict.Exists(CStr(xlsht.Cells(NameRow, col).value)) Then _
+                        recColDict(CStr(xlsht.Cells(NameRow, col).value)) = col
+                End If
             ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "Raw.STD") <> 0 Then
                 ReDim Preserve sdArray(sd)
                 sdArray(sd) = xlsht.Cells(blankRow, col).value
@@ -208,6 +302,22 @@ Sub ICPCleanData()
                 ReDim Preserve paramBArray(pb)
                 paramBArray(pb) = xlsht.Cells(paramBRow, col).value
                 pb = pb + 1
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ParameterA") <> 0 Then
+                ReDim Preserve paramAArray(pa)
+                paramAArray(pa) = xlsht.Cells(paramBRow, col).value
+                pa = pa + 1
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ParameterC") <> 0 Then
+                ReDim Preserve paramCArray(pc)
+                paramCArray(pc) = xlsht.Cells(paramBRow, col).value
+                pc = pc + 1
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "ExtCal.RSE") <> 0 Then
+                ReDim Preserve rseArray(rseI)
+                rseArray(rseI) = xlsht.Cells(paramBRow, col).value
+                rseI = rseI + 1
+            ElseIf InStr(1, CStr(xlsht.Cells(TypeRow, col).value), "CoefficientOfDetermination") <> 0 Then
+                ReDim Preserve codArray(codI)
+                codArray(codI) = xlsht.Cells(paramBRow, col).value
+                codI = codI + 1
             End If
         End If
     Next col
@@ -216,7 +326,21 @@ Sub ICPCleanData()
         'All non-fixed elements including internal standard, start dynamically at column C (col index 3)
         cleanSheet.Cells(1, 3 + i).value = firstRowArray(i)
         cleanSheet.Cells(2, 3 + i).value = WaveLengthArray(i)
-        
+
+        ' Attach the calibration fit (A/B/C/RSE/R2 + linear vs second-order) as a
+        ' hover-note on the wavelength cell. Skipped for internal standards (no
+        ' calibration); survives the later column sort and is removed with any
+        ' deleted (non-validated) wavelength column.
+        If firstRowArray(i) <> "Y" And firstRowArray(i) <> "Sc" And firstRowArray(i) <> "In" Then
+            With cleanSheet.Cells(2, 3 + i)
+                .ClearComments
+                .AddComment Text:=CalNote(firstRowArray(i), CStr(WaveLengthArray(i)), _
+                    SafeCal(paramAArray, i), SafeCal(paramBArray, i), SafeCal(paramCArray, i), _
+                    SafeCal(rseArray, i), SafeCal(codArray, i))
+                .Comment.Shape.TextFrame.AutoSize = True
+            End With
+        End If
+
         '--- Distinguish between Internal Standards (Y) and Analytes ---
         If firstRowArray(i) = "Y" Then
             cleanSheet.Cells(3, 3 + i).value = "% Recovery"
@@ -276,7 +400,8 @@ Sub ICPCleanData()
     l = 0
     m = 0
     While Not xlsht.Cells(row, colSampleLine) = ""
-    
+        dbgStage = "collecting raw row " & row
+
         If IsCalibrationStandard(CStr(xlsht.Cells(row, colSampleLine).value)) Then
             skip = True
             If xlsht.Cells(row, colSampleLine) = "Rinse" Or xlsht.Cells(row, colSampleLine) = "DI" Or xlsht.Cells(row, colSampleLine) = "Blank-20" Then
@@ -286,7 +411,14 @@ Sub ICPCleanData()
                 ReDim Preserve standardStorage(totalElements + 1, k)
                 ReDim Preserve standardsFontColourStorage(totalElements + 1, k)
                 ReDim Preserve stddFArray(3, m)
-                
+                ReDim Preserve prepStdInit(k)
+                ReDim Preserve yStdRec(k)
+                ReDim Preserve yStdRSD(k)
+                yStdRec(k) = "": yStdRSD(k) = ""
+                If colPrep > 0 Then prepStdInit(k) = xlsht.Cells(row, colPrep).value Else prepStdInit(k) = ""
+                If yCol371 > 0 Then yStdRec(k) = xlsht.Cells(row, yCol371).value
+                If yRsdCol371 > 0 Then yStdRSD(k) = xlsht.Cells(row, yRsdCol371).value
+
                 j = 0
                 standardStorage(j, k) = xlsht.Cells(row, colSampleLine)
                 j = 1
@@ -299,7 +431,7 @@ Sub ICPCleanData()
                             Else
                                 standardStorage(j, k) = Format(xlsht.Cells(row, col).value, "#0.00")
                             End If
-                            standardsFontColourStorage(j, k) = xlsht.Cells(row, col).Font.Color
+                            standardsFontColourStorage(j, k) = CleanFontColor(xlsht, row, CStr(xlsht.Cells(NameRow, col).value), CStr(xlsht.Cells(row, colSampleLine).value), xlsht.Cells(row, col).value, rsdColDict, recColDict, True)
                             j = j + 1
                         End If
                     End If
@@ -332,7 +464,14 @@ Sub ICPCleanData()
                     
             If editFlag Then
                 i = i - 1 ' Point to the dataStorage index of the first instance
-                
+                hasFinal(i) = True   ' a 2nd injection exists -> Final DF is meaningful
+                totFinal(i) = xlsht.Cells(row, colDilution).value   ' 2nd injection Total DF
+                If colPrep > 0 Then prepFinal(i) = xlsht.Cells(row, colPrep).value Else prepFinal(i) = ""
+
+                ' Capture this (second) injection's Y371 recovery + RSD as the FINAL values.
+                If yCol371 > 0 Then yFinalRec(i) = xlsht.Cells(row, yCol371).value
+                If yRsdCol371 > 0 Then yFinalRSD(i) = xlsht.Cells(row, yRsdCol371).value
+
                 ' --- Count N/A values in the current (duplicate ID) row ---
                 Dim naCount As Long
                 naCount = 0
@@ -382,14 +521,15 @@ Sub ICPCleanData()
                             performUpdateForThisCell = False
     
                             ' Condition 2: Overrange in first row's specific cell, and current is numeric and not N/A
-                            If CStr(firstInstanceSheetValue) = "Overrange" Then
-                                If IsNumeric(currentValueInSecondRow) And CStr(currentValueInSecondRow) <> "N/A" Then
+                            ' (SafeText avoids a Type-mismatch when a cell holds an Excel error value.)
+                            If SafeText(firstInstanceSheetValue) = "Overrange" Then
+                                If IsNumeric(currentValueInSecondRow) And SafeText(currentValueInSecondRow) <> "N/A" Then
                                     performUpdateForThisCell = True
                                 End If
                             End If
-    
+
                             ' Condition 1: At least 2 N/A's in the second row as a whole, and current cell is not N/A
-                            If replaceDueToNAcount And CStr(currentValueInSecondRow) <> "N/A" Then
+                            If replaceDueToNAcount And SafeText(currentValueInSecondRow) <> "N/A" Then
                                 'This also handles if currentValueInSecondRow is an error like #N/A from the sheet
                                 If IsError(currentValueInSecondRow) Then
                                     If currentValueInSecondRow <> CVErr(xlErrNA) Then ' If it's an error but not #N/A, allow update
@@ -433,11 +573,11 @@ Sub ICPCleanData()
                                         Else
                                             dataStorage(j_element, i) = avgVal
                                         End If
-                                        dataFontColourStorage(j_element, i) = xlsht.Cells(row, colLoop).Font.Color
+                                        dataFontColourStorage(j_element, i) = CleanFontColor(xlsht, row, CStr(xlsht.Cells(NameRow, colLoop).value), CStr(xlsht.Cells(row, colSampleLine).value), avgVal, rsdColDict, recColDict)
                                     End If
                                 Else
                                     dataStorage(j_element, i) = avgVal
-                                    dataFontColourStorage(j_element, i) = xlsht.Cells(row, colLoop).Font.Color
+                                    dataFontColourStorage(j_element, i) = CleanFontColor(xlsht, row, CStr(xlsht.Cells(NameRow, colLoop).value), CStr(xlsht.Cells(row, colSampleLine).value), avgVal, rsdColDict, recColDict)
                                 End If
                             End If
                             j_element = j_element + 1
@@ -500,6 +640,22 @@ Sub ICPCleanData()
                ReDim Preserve dataStorage(totalElements + 1, i)
                ReDim Preserve dataFontColourStorage(totalElements + 1, i)
                ReDim Preserve dFArray(3, i) ' dFArray is 0-indexed for second dim, matching i. Dimension to hold DF, Rack, and Vial
+               ReDim Preserve hasFinal(i)
+               ReDim Preserve prepInit(i)
+               ReDim Preserve totFinal(i)
+               ReDim Preserve prepFinal(i)
+               ReDim Preserve yInitRec(i)
+               ReDim Preserve yInitRSD(i)
+               ReDim Preserve yFinalRec(i)
+               ReDim Preserve yFinalRSD(i)
+               hasFinal(i) = False
+               totFinal(i) = "": prepFinal(i) = ""
+               yInitRec(i) = "": yInitRSD(i) = "": yFinalRec(i) = "": yFinalRSD(i) = ""
+               If colPrep > 0 Then prepInit(i) = xlsht.Cells(row, colPrep).value Else prepInit(i) = ""
+
+               ' Capture this (first) injection's Y371 recovery + RSD as the INITIAL values.
+               If yCol371 > 0 Then yInitRec(i) = xlsht.Cells(row, yCol371).value
+               If yRsdCol371 > 0 Then yInitRSD(i) = xlsht.Cells(row, yRsdCol371).value
 
                j = 0   ' For dataStorage: 0 is SampleLine, 1+ are elements
                dataStorage(j, i) = xlsht.Cells(row, colSampleLine).value ' Sample ID
@@ -537,11 +693,11 @@ Sub ICPCleanData()
                                     Else
                                        dataStorage(j, i) = avgVal
                                     End If
-                                   dataFontColourStorage(j, i) = xlsht.Cells(row, col).Font.Color
+                                   dataFontColourStorage(j, i) = CleanFontColor(xlsht, row, CStr(xlsht.Cells(NameRow, col).value), CStr(xlsht.Cells(row, colSampleLine).value), avgVal, rsdColDict, recColDict)
                                End If
                            Else
                                dataStorage(j, i) = avgVal
-                               dataFontColourStorage(j, i) = xlsht.Cells(row, col).Font.Color
+                               dataFontColourStorage(j, i) = CleanFontColor(xlsht, row, CStr(xlsht.Cells(NameRow, col).value), CStr(xlsht.Cells(row, colSampleLine).value), avgVal, rsdColDict, recColDict)
                            End If
                            j = j + 1
                        End If
@@ -620,7 +776,7 @@ Sub ICPCleanData()
     
     j = 0
     i = 0
-    row = DataRow
+    row = dataRow
     col = 1
     'insert the non-standards data
     For j = 0 To UBound(dataStorage, 1)
@@ -641,7 +797,7 @@ Sub ICPCleanData()
              End If
             row = row + 1
         Next i
-        row = DataRow
+        row = dataRow
         If j <> UBound(dataStorage, 1) And j < UBound(elementArray, 1) Then
             If elementArray(j) <> "" Then
                 col = elementArray(j)
@@ -677,7 +833,7 @@ Sub ICPCleanData()
             End If
             row = row + 1
          Next i
-        row = UBound(dataStorage, 2) + DataRow + 1
+        row = UBound(dataStorage, 2) + dataRow + 1
         If j <= UBound(elementArray, 1) Then
             col = elementArray(j)
         End If
@@ -687,43 +843,65 @@ Sub ICPCleanData()
     
     i = 0
     For i = 0 To UBound(dFArray, 2)
-        ' 1. Print the columns as usual
-        cleanSheet.Cells(DataRow + i, idf).value = dFArray(0, i)
-        cleanSheet.Cells(DataRow + i, fdf).value = dFArray(1, i)
-        cleanSheet.Cells(DataRow + i, fdf + 1).value = dFArray(2, i) ' Rack Number
-        cleanSheet.Cells(DataRow + i, fdf + 2).value = dFArray(3, i) ' Vial Number
-        
-        ' 2. Create and attach the hover-note to the Sample ID (Column A / 1)
-        cText = "Initial DF: " & dFArray(0, i) & vbCrLf & _
-                "Final DF: " & dFArray(1, i) & vbCrLf & _
-                "Rack #: " & dFArray(2, i) & vbCrLf & _
-                "Vial #: " & dFArray(3, i)
-                
-        With cleanSheet.Cells(DataRow + i, 1)
+        ' 1. Print the columns as usual. Final DF is only shown when a 2nd injection
+        '    (intelligent dilution) exists; otherwise it is left blank.
+        dbgStage = "data DF cells i=" & i
+        cleanSheet.Cells(dataRow + i, idf).value = dFArray(0, i)
+        If hasFinal(i) Then
+            cleanSheet.Cells(dataRow + i, fdf).value = dFArray(1, i)
+        Else
+            cleanSheet.Cells(dataRow + i, fdf).value = ""
+        End If
+        cleanSheet.Cells(dataRow + i, fdf + 1).value = dFArray(2, i) ' Rack Number
+        cleanSheet.Cells(dataRow + i, fdf + 2).value = dFArray(3, i) ' Vial Number
+
+        ' 2. Create and attach the hover-note to the Sample ID (Column A / 1),
+        '    including the internal-standard recovery (ISR) for each dilution.
+        '    SafeText guards against any error cell; ISR comes from the already-
+        '    formatted Y display (just strip the trailing " %").
+        dbgStage = "data note i=" & i
+        cText = DFNoteBlock("Initial DF", dFArray(0, i), prepInit(i), yInitRec(i), yInitRSD(i))
+        cText = cText & vbCrLf
+        If hasFinal(i) Then
+            cText = cText & DFNoteBlock("Final DF", totFinal(i), prepFinal(i), yFinalRec(i), yFinalRSD(i))
+        Else
+            cText = cText & DFNoteBlock("Final DF", "", "", "", "")
+        End If
+        cText = cText & vbCrLf & "Rack #: " & SafeText(dFArray(2, i)) & vbCrLf & "Vial #: " & SafeText(dFArray(3, i))
+
+        dbgStage = "data addcomment i=" & i
+        With cleanSheet.Cells(dataRow + i, 1)
             .ClearComments
             .AddComment Text:=cText
             .Comment.Shape.TextFrame.AutoSize = True
+            ' Colour the Sample ID by the worst Y371 IS quality across both dilutions.
+            .Font.Color = SeverityColor(WorstSeverity4(yInitRec(i), yInitRSD(i), yFinalRec(i), yFinalRSD(i)))
         End With
     Next i
     
     placeholder = i
+    dbgStage = "writing DF/notes (standards)"
     For i = 0 To UBound(stddFArray, 2)
-        ' 1. Print the columns as usual
-        cleanSheet.Cells(placeholder + DataRow + i, idf).value = stddFArray(0, i)
-        cleanSheet.Cells(placeholder + DataRow + i, fdf).value = stddFArray(1, i)
-        cleanSheet.Cells(placeholder + DataRow + i, fdf + 1).value = stddFArray(2, i) ' Rack Number
-        cleanSheet.Cells(placeholder + DataRow + i, fdf + 2).value = stddFArray(3, i) ' Vial Number
-        
-        ' 2. Create and attach the hover-note to the Sample ID (Column A / 1)
-        cText = "Initial DF: " & stddFArray(0, i) & vbCrLf & _
-                "Final DF: " & stddFArray(1, i) & vbCrLf & _
-                "Rack #: " & stddFArray(2, i) & vbCrLf & _
-                "Vial #: " & stddFArray(3, i)
-                
-        With cleanSheet.Cells(placeholder + DataRow + i, 1)
+        ' 1. Print the columns as usual. Standards have no 2nd injection, so Final
+        '    DF is left blank.
+        cleanSheet.Cells(placeholder + dataRow + i, idf).value = stddFArray(0, i)
+        cleanSheet.Cells(placeholder + dataRow + i, fdf).value = ""
+        cleanSheet.Cells(placeholder + dataRow + i, fdf + 1).value = stddFArray(2, i) ' Rack Number
+        cleanSheet.Cells(placeholder + dataRow + i, fdf + 2).value = stddFArray(3, i) ' Vial Number
+
+        ' 2. Create and attach the hover-note to the Sample ID (Column A / 1),
+        '    including the internal-standard recovery (ISR).
+        cText = DFNoteBlock("Initial DF", stddFArray(0, i), prepStdInit(i), yStdRec(i), yStdRSD(i))
+        cText = cText & vbCrLf & DFNoteBlock("Final DF", "", "", "", "")
+        cText = cText & vbCrLf & "Rack #: " & SafeText(stddFArray(2, i)) & vbCrLf & _
+                "Vial #: " & SafeText(stddFArray(3, i))
+
+        With cleanSheet.Cells(placeholder + dataRow + i, 1)
             .ClearComments
             .AddComment Text:=cText
             .Comment.Shape.TextFrame.AutoSize = True
+            ' Colour the Sample ID by the Y371 internal-standard quality.
+            .Font.Color = SeverityColor(WorstSeverity(yStdRec(i), yStdRSD(i)))
         End With
     Next i
     
@@ -819,16 +997,16 @@ Sub ICPCleanData()
     Dim targetRange As Range
 
     ' Determine the last row with data in Column A (SampleLine)
-    If cleanSheet.Cells(cleanSheet.Rows.Count, 1).End(xlUp).row < DataRow Then
+    If cleanSheet.Cells(cleanSheet.Rows.Count, 1).End(xlUp).row < dataRow Then
         ' Handles case where no data samples were processed below DataRow
         ' though this is unlikely if the macro ran successfully to this point with data.
-        lastPopulatedRow = DataRow
+        lastPopulatedRow = dataRow
     Else
         lastPopulatedRow = cleanSheet.Cells(cleanSheet.Rows.Count, 1).End(xlUp).row
     End If
     
     ' Loop from the first data row to the last populated row on cleanSheet
-    For r = DataRow To lastPopulatedRow
+    For r = dataRow To lastPopulatedRow
         sampleLineValue = Trim(CStr(cleanSheet.Cells(r, 1).value)) ' Get SampleLine from Column A
 
         ' Define the range for the current row from column A to BZ
@@ -852,7 +1030,19 @@ Sub ICPCleanData()
         End If
     Next r
     ' --- END OF NEW SECTION ---
-    
+
+    ' Enforce the standard font (Aptos Narrow 11) across the whole Clean Data tab
+    ' before auto-fitting, so column widths account for it. Name/size only - this
+    ' leaves the bold headers, grey wavelengths and coloured data values intact.
+    cleanSheet.UsedRange.Font.Name = "Aptos Narrow"
+    cleanSheet.UsedRange.Font.Size = 11
+
+    ' Subscript "BLK" in the LOD formula (chars 7-9 of "LOD=SDBLK..."), applied
+    ' after the sheet-wide font pass so it survives.
+    On Error Resume Next
+    cleanSheet.Cells(4, 2).Characters(Start:=7, Length:=3).Font.Subscript = True
+    On Error GoTo ErrorHandler
+
     cleanSheet.Range("A1:BZ1001").EntireColumn.AutoFit ' RANGE TO BZ
     ' cleanSheet.Range("B3:AZ1001").NumberFormat = "#0.00"
     
@@ -894,7 +1084,12 @@ Sub ICPCleanData()
                 Case "P":  keepWave = "177.495"
                 Case "As": keepWave = "189.042"
                 Case "S":  keepWave = "182.034"
-                
+
+                ' Internal standard Y is removed from the element block; it is
+                ' re-added as dedicated initial/final columns by the DF block below.
+                ' keepWave "0" matches neither 360.073 nor 371.030, so both are deleted.
+                Case "Y":  keepWave = "0"
+
                 Case Else
                     ' Lanthanides, Internal Stds, or any forgotten elements land here
                     keepWave = "UNKNOWN"
@@ -921,63 +1116,110 @@ Sub ICPCleanData()
         End If
     Next colIndex
     ' ==========================================================================
-     
+
+    ' ==========================================================================
+    ' TRIM TRAILING METADATA COLUMNS
+    ' All per-injection metadata (Total/Manual/prepFAST DF + ISR for each dilution,
+    ' plus Rack/Vial) now lives in the Sample-ID hover note, so the visible
+    ' Initial DF / Final DF / Rack Number / Vial Number columns - and the blank
+    ' separator column to their left - are deleted. The sheet ends at the last analyte.
+    ' ==========================================================================
+    Dim idfCol As Long, scanC As Long, lastHdrCol As Long
+    idfCol = 0
+    lastHdrCol = cleanSheet.Cells(1, cleanSheet.Columns.Count).End(xlToLeft).column
+    For scanC = 3 To lastHdrCol
+        If Trim(CStr(cleanSheet.Cells(1, scanC).value)) = "Initial Dilution Factor" Then
+            idfCol = scanC
+            Exit For
+        End If
+    Next scanC
+
+    dbgStage = "trimming trailing metadata columns"
+    If idfCol > 3 Then
+        ' Delete from the blank separator (just left of Initial DF) to the last column.
+        lastHdrCol = cleanSheet.Cells(1, cleanSheet.Columns.Count).End(xlToLeft).column
+        cleanSheet.Range(cleanSheet.Columns(idfCol - 1), cleanSheet.Columns(lastHdrCol)).Delete
+    End If
+    ' ==========================================================================
+
     ' Freeze panes on cleanSheet at C8 (DataRow is 8)
     Application.StatusBar = "Freezing panes on Clean Data sheet..." ' Optional status update
     With ActiveWindow
         cleanSheet.Activate ' Ensure cleanSheet is active for ActiveWindow context
         If .FreezePanes Then .FreezePanes = False ' Unfreeze if already frozen from a previous run
-        cleanSheet.Cells(DataRow, "C").Select     ' Selects cell C8 (since DataRow = 8)
+        cleanSheet.Cells(dataRow, "C").Select     ' Selects cell C8 (since DataRow = 8)
         .FreezePanes = True
     End With
 
-    ' Freeze panes on xlsht (raw data sheet) at roughly the data start
+    ' Freeze panes on xlsht (raw data sheet) at C5 - the 4 header rows and the first
+    ' two columns - consistent for both the .xml and .csv layouts.
     Application.StatusBar = "Freezing panes on raw data sheet..." ' Optional status update
     With ActiveWindow
         xlsht.Activate ' Ensure raw data sheet is active for ActiveWindow context
         If .FreezePanes Then .FreezePanes = False ' Unfreeze if already frozen
-        xlsht.Cells(5, "H").Select
-        ' Selects cell H5
+        xlsht.Cells(5, "C").Select
+        ' Selects cell C5
         .FreezePanes = True
     End With
+    ' Standardise the raw tab's font (Aptos Narrow 11) to match the Clean Data tab.
+    xlsht.UsedRange.Font.Name = "Aptos Narrow"
+    xlsht.UsedRange.Font.Size = 11
+    ' Auto-fit the raw tab's label column (B) so sample IDs are readable.
+    xlsht.Columns("B").AutoFit
     
     ' Optionally, activate the cleanSheet again to leave it as the active one for the user.
     ' This also influences which sheet is active if the CSV save relied on 'ActiveSheet'.
     cleanSheet.Activate
     Application.StatusBar = False ' Clear status bar
     
-    Dim SaveToDirectory As String
     Dim CurrentWorkbookName As String
     Dim CurrentWorkbook As Workbook
-    Dim wsToExport As Worksheet
-    
+    Dim srcFullName As String, srcFolder As String, xlsxPath As String
+
+    dbgStage = "saving output workbook"
     Set CurrentWorkbook = ActiveWorkbook
     CurrentWorkbookName = CurrentWorkbook.Name
-    CurrentWorkbookName = Replace(CurrentWorkbookName, ".xml", "")
-    
-    ' Store current details for the workbook
+    srcFullName = CurrentWorkbook.FullName   ' original .xml/.csv on disk
+    srcFolder = CurrentWorkbook.Path         ' the source file's own folder
+
+    ' Build the output name: same folder + same base name, as .xlsx. Strip .xlsx as
+    ' well so re-running the macro on an already-converted .xlsx targets the same
+    ' file (handled by the Save-in-place branch below) instead of "name.xlsx.xlsx"
+    ' or tripping "can't open two workbooks with the same name".
+    CurrentWorkbookName = Replace(CurrentWorkbookName, ".xml", "", , , vbTextCompare)
+    CurrentWorkbookName = Replace(CurrentWorkbookName, ".csv", "", , , vbTextCompare)
+    CurrentWorkbookName = Replace(CurrentWorkbookName, ".xlsx", "", , , vbTextCompare)
+    xlsxPath = srcFolder & "\" & CurrentWorkbookName & ".xlsx"
+
+    ' Name the raw tab after the file (matching how Excel names a CSV's sheet) so the
+    ' .xlsx is identical whether it came from .xml ("Test") or .csv. Sheet names are
+    ' capped at 31 chars and cannot contain : \ / ? * [ ].
+    Dim rawTabName As String, bc As Variant
+    rawTabName = CurrentWorkbookName
+    For Each bc In Array(":", "\", "/", "?", "*", "[", "]")
+        rawTabName = Replace(rawTabName, bc, "_")
+    Next bc
+    If Len(rawTabName) > 31 Then rawTabName = Left$(rawTabName, 31)
+    On Error Resume Next
+    xlsht.Name = rawTabName
+    On Error GoTo ErrorHandler
+
+    ' Save the whole workbook (raw tab + new "Clean Data" tab) as .xlsx. When the
+    ' open workbook is already that .xlsx (re-running on the converted output), just
+    ' save it in place - SaveAs to the open workbook's own name throws "can't open
+    ' two workbooks with the same name". Otherwise SaveAs and delete the source.
+    cleanSheet.Activate
     Application.DisplayAlerts = False
-    CurrentWorkbook.Save
+    If LCase$(srcFullName) = LCase$(xlsxPath) Then
+        CurrentWorkbook.Save
+    Else
+        CurrentWorkbook.SaveAs Filename:=xlsxPath, FileFormat:=xlOpenXMLWorkbook
+        On Error Resume Next
+        Kill srcFullName   ' remove the now-superseded .xml/.csv
+        On Error GoTo ErrorHandler
+    End If
     Application.DisplayAlerts = True
-    
-    Set wsToExport = ActiveSheet
-    Dim UserName As String
-    UserName = Environ("USERNAME")
-    SaveToDirectory = "C:\Users\" & UserName & "\Summit Nanotech Corporation\Research & Development - Documents\02 - Lab Instrument Analysis\01 - Internal\01 - ICP-OES\01 - Results\CleanCSVsForLUCAN\" & CStr(CurrentWorkbookName)
-    
-    ' Copy sheet to a background workbook to save CSV without changing active view
-    wsToExport.Copy
-    Dim tempWB As Workbook
-    Set tempWB = ActiveWorkbook
-    
-    Application.DisplayAlerts = False
-    tempWB.SaveAs Filename:=SaveToDirectory, FileFormat:=xlCSV
-    tempWB.Close SaveChanges:=False
-    Application.DisplayAlerts = True
-    
-    CurrentWorkbook.Activate
-    wsToExport.Activate
-    
+
 CleanExit:
     Application.ScreenUpdating = True
     Application.EnableEvents = True
@@ -986,8 +1228,8 @@ CleanExit:
     Exit Sub
 
 ErrorHandler:
-    MsgBox "An error occurred: " & Err.Description & " (Error " & Err.Number & ")", vbCritical, "Macro Error"
+    MsgBox "An error occurred: " & Err.Description & " (Error " & Err.Number & ")" & _
+           vbCrLf & "Stage: " & dbgStage, vbCritical, "Macro Error"
     GoTo CleanExit
 
 End Sub
-
